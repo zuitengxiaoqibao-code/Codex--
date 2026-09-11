@@ -1,0 +1,365 @@
+using System.Collections.ObjectModel;
+using System.ComponentModel;
+using System.Diagnostics;
+using System.Globalization;
+using System.IO;
+using System.Windows;
+using System.Windows.Controls;
+using System.Windows.Data;
+using Microsoft.Win32;
+using CodexBackup.Core;
+
+namespace CodexBackup.App;
+
+public partial class MainWindow : Window
+{
+    private readonly DiscoveryService discovery = new();
+    private readonly BackupEngine backupEngine = new();
+    private readonly PackageVerifier verifier = new();
+    private readonly RestoreEngine restoreEngine = new();
+    private readonly ObservableCollection<SourceItem> sources = [];
+    private readonly ObservableCollection<MappingRow> mappings = [];
+    private CancellationTokenSource? operationCts;
+    private ScanResult? scan;
+    private VerifiedPackage? verifiedPackage;
+    private RestorePreview? restorePreview;
+    private string? previewFingerprint;
+    private string? resultPath;
+
+    public MainWindow()
+    {
+        InitializeComponent();
+        SourcesGrid.ItemsSource = sources;
+        MappingsGrid.ItemsSource = mappings;
+        ProfilePathBox.Text = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+        BackupDestinationBox.Text = "";
+        SourcesGrid.BeginningEdit += (_, e) => { if (e.Column.DisplayIndex == 0 && e.Row.Item is SourceItem { Required: true }) e.Cancel = true; };
+        MappingsGrid.CellEditEnding += (_, _) => { restorePreview = null; previewFingerprint = null; };
+        Closing += Window_Closing;
+    }
+
+    private void ShowPage(FrameworkElement page)
+    {
+        foreach (var candidate in new[] { WelcomePage, HomePage, BackupPage, RestorePage, CheckPage, ResultPage }) candidate.Visibility = Visibility.Collapsed;
+        page.Visibility = Visibility.Visible;
+    }
+
+    private void WelcomeContinue_Click(object sender, RoutedEventArgs e)
+    {
+        if (RiskAcknowledgement.IsChecked != true) { MessageBox.Show(this, "请先确认已阅读风险与验收边界。", "需要确认", MessageBoxButton.OK, MessageBoxImage.Information); return; }
+        ShowPage(HomePage);
+    }
+
+    private void OpenBackup_Click(object sender, RoutedEventArgs e) => ShowPage(BackupPage);
+    private void OpenRestore_Click(object sender, RoutedEventArgs e) => ShowPage(RestorePage);
+    private void OpenCheck_Click(object sender, RoutedEventArgs e) => ShowPage(CheckPage);
+    private void BackHome_Click(object sender, RoutedEventArgs e) => ShowPage(HomePage);
+
+    private static string? PickFolder(string title, string? initial = null)
+    {
+        var dialog = new OpenFolderDialog { Title = title, Multiselect = false };
+        if (!string.IsNullOrWhiteSpace(initial) && Directory.Exists(initial)) dialog.InitialDirectory = initial;
+        return dialog.ShowDialog() == true ? dialog.FolderName : null;
+    }
+
+    private void BrowseProfile_Click(object sender, RoutedEventArgs e) { var path = PickFolder("选择要扫描的用户配置目录", ProfilePathBox.Text); if (path is not null) ProfilePathBox.Text = path; }
+    private void BrowseBackupDestination_Click(object sender, RoutedEventArgs e)
+    {
+        var path = PickFolder("选择备份保存目录", BackupDestinationBox.Text); if (path is null) return;
+        BackupDestinationBox.Text = path;
+        try
+        {
+            var drive = new DriveInfo(Path.GetPathRoot(Path.GetFullPath(path))!);
+            var targetDisks = WindowsEnvironment.GetDiskNumbers(path);
+            var overlap = sources.Where(s => s.Selected && s.Exists).Any(s => WindowsEnvironment.GetDiskNumbers(s.Path).Intersect(targetDisks).Any());
+            DestinationInfoText.Text = WindowsEnvironment.DescribeVolume(path) + (targetDisks.Count == 0 ? "。物理磁盘关系未知，请核对外置介质。" : overlap ? "。注意：与至少一个来源共用物理硬盘，不能防护该硬盘损坏。" : "。已识别目标磁盘；请保留独立副本。") + " 加密保护状态未确认。";
+        }
+        catch { DestinationInfoText.Text = "无法读取目标卷信息；Core 预检会阻止不支持或空间不足的目标。请自行确认物理介质。"; }
+    }
+
+    private async void Scan_Click(object sender, RoutedEventArgs e)
+    {
+        var profile = ProfilePathBox.Text.Trim();
+        if (!Directory.Exists(profile)) { MessageBox.Show(this, "用户配置目录不存在或不可访问。", "无法扫描", MessageBoxButton.OK, MessageBoxImage.Warning); return; }
+        await RunBusyAsync("正在扫描 Codex 数据位置…", async (progress, ct) =>
+        {
+            scan = await Task.Run(() => discovery.ScanAsync(profile, progress, ct), ct);
+            sources.Clear(); foreach (var item in scan.Items) sources.Add(item);
+            BackupFindingsList.Items.Clear();
+            BackupFindingsList.Items.Add($"用户：{scan.UserName} · 计算机：{scan.MachineName} · Codex 版本：{scan.CodexVersion}");
+            BackupFindingsList.Items.Add($"发现 {scan.Items.Count} 个来源；安装位置 {scan.InstallationPaths.Count} 个。未列出的范围不视为已覆盖。");
+            foreach (var finding in scan.Findings) BackupFindingsList.Items.Add(FormatFinding(finding));
+        });
+    }
+
+    private void AddFolder_Click(object sender, RoutedEventArgs e)
+    {
+        var path = PickFolder("添加自定义备份文件夹"); if (path is null) return;
+        AddManual(path, true);
+    }
+
+    private void AddFile_Click(object sender, RoutedEventArgs e)
+    {
+        var dialog = new OpenFileDialog { Title = "添加自定义备份文件", CheckFileExists = true, Multiselect = false };
+        if (dialog.ShowDialog() == true) AddManual(dialog.FileName, false);
+    }
+
+    private void AddManual(string path, bool directory)
+    {
+        var full = Path.GetFullPath(path);
+        if (sources.Any(x => string.Equals(Path.GetFullPath(x.Path), full, StringComparison.OrdinalIgnoreCase))) return;
+        sources.Add(new SourceItem { Name = Path.GetFileName(full), Path = full, Kind = SourceKind.Custom, Selected = true, Exists = true, IsDirectory = directory, Reason = "用户手动加入", DiscoveredBy = "手动选择", LastModifiedUtc = directory ? Directory.GetLastWriteTimeUtc(full) : File.GetLastWriteTimeUtc(full) });
+    }
+
+    private async void StartBackup_Click(object sender, RoutedEventArgs e)
+    {
+        SourcesGrid.CommitEdit(DataGridEditingUnit.Cell, true); SourcesGrid.CommitEdit(DataGridEditingUnit.Row, true);
+        if (scan is null) { MessageBox.Show(this, "请先完成扫描。", "缺少扫描结果"); return; }
+        if (BackupReviewCheck.IsChecked != true) { MessageBox.Show(this, "请确认备份包的保存位置与未加密风险。", "需要确认"); return; }
+        var destination = BackupDestinationBox.Text.Trim();
+        if (string.IsNullOrWhiteSpace(destination)) { MessageBox.Show(this, "请选择备份保存目录。", "缺少目标"); return; }
+        if (IsCurrentProcessLocation(destination)) { MessageBox.Show(this, "保存目录与本程序运行目录重叠，目标含义不明确。请选择独立目录。", "路径冲突", MessageBoxButton.OK, MessageBoxImage.Warning); return; }
+        if (MessageBox.Show(this, $"将备份 {sources.Count(s => s.Selected)} 项，另有 {sources.Count(s => !s.Selected)} 项未独立选择。\n\n目标：{destination}\n\n精确空间、文件类型和运行程序将在写入前再次检查。备份包含原始配置，可能含凭据。确认开始？", "最终备份确认", MessageBoxButton.OKCancel, MessageBoxImage.Warning) != MessageBoxResult.OK) return;
+        await RunBusyAsync("正在创建并逐文件校验备份…", async (progress, ct) =>
+        {
+            var request = new BackupRequest { Sources = sources.ToList(), DestinationDirectory = destination, CoverageNotes = scan.Findings.Select(FormatFinding).ToList() };
+            var result = await Task.Run(() => backupEngine.BackupAsync(request, progress, ct), ct);
+            ShowResult("备份包已创建并通过文件校验", $"文件：{result.Manifest.FileCount:N0}，大小：{FormatBytes(result.Manifest.TotalBytes)}。请保留报告中的覆盖限制，并在新系统完成 Codex 人工验收。", result.PackagePath, result.Manifest.CoverageNotes);
+        });
+    }
+
+    private async void ChooseRestorePackage_Click(object sender, RoutedEventArgs e)
+    {
+        var path = PickFolder("选择包含 COMPLETE.json 的备份包目录"); if (path is null) return;
+        RestorePackageBox.Text = path;
+        await RunBusyAsync("正在完整校验备份包…", async (progress, ct) =>
+        {
+            verifiedPackage = await Task.Run(() => verifier.VerifyAsync(path, progress, ct), ct);
+            mappings.Clear();
+            var isolatedBase = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), "Codex-Restored", verifiedPackage.Manifest.BackupId);
+            foreach (var root in verifiedPackage.Manifest.Roots)
+                mappings.Add(new MappingRow(root.Id, root.OriginalPath, Path.Combine(isolatedBase, SafeName(root.Name, root.Id) + "-" + root.Id[..8]), root.Kind));
+            restorePreview = null; previewFingerprint = null; RestorePreviewList.Items.Clear();
+            RestorePreviewList.Items.Add($"备份包完整性通过：{verifiedPackage.Manifest.FileCount:N0} 个文件，{FormatBytes(verifiedPackage.Manifest.TotalBytes)}。");
+            RestorePreviewList.Items.Add("尚未执行恢复预演；文件校验不代表应用层验收通过。");
+        });
+    }
+
+    private void RestoreOptionChanged(object sender, RoutedEventArgs e) { ClearRestorePreview("恢复选项已更改，请重新预演。"); }
+
+    private void MapCoreToRuntime_Click(object sender, RoutedEventArgs e)
+    {
+        if (verifiedPackage is null) { MessageBox.Show(this, "请先选择并验证备份包。", "缺少备份包"); return; }
+        MappingsGrid.CommitEdit(DataGridEditingUnit.Cell, true); MappingsGrid.CommitEdit(DataGridEditingUnit.Row, true);
+        var allCore = mappings.Where(x => x.Kind == SourceKind.Core).ToList();
+        if (allCore.Count == 0) { MessageBox.Show(this, "此备份包不含 Codex 核心根。", "没有核心数据"); return; }
+        var selectedCore = allCore.Where(x => x.Selected).ToList();
+        if (allCore.Count > 1 && selectedCore.Count != 1)
+        {
+            MessageBox.Show(this, "备份包包含多个 Codex 核心根。请在表格中只勾选一个核心根，再执行本机映射。", "需要明确选择", MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
+        }
+        var core = allCore.Count == 1 ? allCore[0] : selectedCore[0];
+        core.Selected = true;
+        try { core.TargetPath = RuntimeCodexHome(); }
+        catch (Exception ex) when (ex is BackupException or ArgumentException or NotSupportedException)
+        { MessageBox.Show(this, "本机 CODEX_HOME 不是有效的绝对本地路径，请检查环境变量或手动填写。", "无法自动映射", MessageBoxButton.OK, MessageBoxImage.Warning); return; }
+        MappingsGrid.Items.Refresh();
+        IsolatedCheck.IsChecked = false;
+        ClearRestorePreview("已将所选核心映射到本机 Codex 数据目录。其他根仍使用表格中的隔离目标；配置、凭据、技能、插件和自动化不会自动启用，恢复后必须重新登录并审核。");
+    }
+
+    private static string RuntimeCodexHome()
+    {
+        foreach (var value in new[]
+        {
+            Environment.GetEnvironmentVariable("CODEX_HOME"),
+            Environment.GetEnvironmentVariable("CODEX_HOME", EnvironmentVariableTarget.User),
+            Environment.GetEnvironmentVariable("CODEX_HOME", EnvironmentVariableTarget.Machine)
+        })
+            if (!string.IsNullOrWhiteSpace(value)) return PathSafety.Full(value);
+        return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".codex");
+    }
+
+    private void ClearRestorePreview(string message)
+    {
+        restorePreview = null; previewFingerprint = null;
+        if (RestorePreviewList is not null) { RestorePreviewList.Items.Clear(); RestorePreviewList.Items.Add(message); }
+    }
+
+    private RestoreRequest BuildRestoreRequest() => new()
+    {
+        PackagePath = RestorePackageBox.Text,
+        Isolated = IsolatedCheck.IsChecked == true,
+        ReplaceExisting = ReplaceExistingCheck.IsChecked == true,
+        Mappings = mappings.Where(x => x.Selected).Select(x => new RestoreMapping { RootId = x.RootId, TargetPath = x.TargetPath.Trim() }).ToList()
+    };
+
+    private async void PreviewRestore_Click(object sender, RoutedEventArgs e)
+    {
+        MappingsGrid.CommitEdit(DataGridEditingUnit.Cell, true); MappingsGrid.CommitEdit(DataGridEditingUnit.Row, true);
+        if (verifiedPackage is null) { MessageBox.Show(this, "请先选择并验证备份包。", "缺少备份包"); return; }
+        if (!mappings.Any(x => x.Selected)) { MessageBox.Show(this, "请至少勾选一个要恢复的根。", "尚未选择"); return; }
+        if (mappings.Any(x => x.Selected && string.IsNullOrWhiteSpace(x.TargetPath))) { MessageBox.Show(this, "每个已选来源都必须设置恢复目标。", "映射不完整"); return; }
+        var request = BuildRestoreRequest();
+        await RunBusyAsync("正在预演恢复路径与冲突…", async (_, ct) =>
+        {
+            restorePreview = await Task.Run(() => restoreEngine.PreviewAsync(request, ct), ct);
+            previewFingerprint = System.Text.Json.JsonSerializer.Serialize(request);
+            RestorePreviewList.Items.Clear();
+            foreach (var item in restorePreview.Items) RestorePreviewList.Items.Add($"{item.SourceName} → {item.TargetPath} · {item.Action}");
+            foreach (var finding in restorePreview.Findings) RestorePreviewList.Items.Add(FormatFinding(finding));
+            RestorePreviewList.Items.Add(restorePreview.CanProceed ? "预演未发现阻断项；仍需确认后执行。" : "存在阻断项，不能执行恢复。");
+        });
+    }
+
+    private async void ExecuteRestore_Click(object sender, RoutedEventArgs e)
+    {
+        MappingsGrid.CommitEdit(DataGridEditingUnit.Cell, true); MappingsGrid.CommitEdit(DataGridEditingUnit.Row, true);
+        if (!mappings.Any(x => x.Selected) || mappings.Any(x => x.Selected && string.IsNullOrWhiteSpace(x.TargetPath))) { MessageBox.Show(this, "请至少选择一个根，并为所有已选根设置恢复目标。", "映射不完整"); return; }
+        var request = BuildRestoreRequest();
+        if (restorePreview is null) { MessageBox.Show(this, "请先执行恢复预演。", "需要预演"); return; }
+        if (previewFingerprint != System.Text.Json.JsonSerializer.Serialize(request)) { restorePreview = null; MessageBox.Show(this, "恢复路径或选项已经变化，请重新预演。", "需要重新预演"); return; }
+        if (!restorePreview.CanProceed) { MessageBox.Show(this, "预演存在阻断项，不能恢复。", "已阻断", MessageBoxButton.OK, MessageBoxImage.Error); return; }
+        if (ReplaceExistingCheck.IsChecked == true && MessageBox.Show(this, "替换已有内容会修改目标，并创建回滚日志。确认按当前映射执行？", "确认替换", MessageBoxButton.YesNo, MessageBoxImage.Warning) != MessageBoxResult.Yes) return;
+        if (MessageBox.Show(this, "即将按预演结果写入文件。请确认 Codex 及相关工具均已关闭。", "执行恢复", MessageBoxButton.OKCancel, MessageBoxImage.Warning) != MessageBoxResult.OK) return;
+        await RunBusyAsync("正在恢复并写入回滚日志…", async (progress, ct) =>
+        {
+            var result = await Task.Run(() => restoreEngine.RestoreAsync(request, progress, ct), ct);
+            ShowResult("恢复文件已写入，等待人工验收", $"已恢复 {result.RestoredPaths.Count} 个根路径。回滚日志已保存；请启动 Codex 手动检查登录、会话、项目、技能与记忆。", result.JournalPath, result.Notes);
+        });
+    }
+
+    private async void CheckEnvironment_Click(object sender, RoutedEventArgs e)
+    {
+        await RunBusyAsync("正在只读扫描当前环境…", async (progress, ct) =>
+        {
+            var result = await Task.Run(() => discovery.ScanAsync(null, progress, ct), ct);
+            CheckResultsList.Items.Clear(); CheckResultsList.Items.Add($"发现 {result.Items.Count} 个来源，Codex 版本：{result.CodexVersion}。覆盖范围外的内容仍为未知。");
+            foreach (var finding in result.Findings) CheckResultsList.Items.Add(FormatFinding(finding));
+        });
+    }
+
+    private async void VerifyPackage_Click(object sender, RoutedEventArgs e)
+    {
+        var path = PickFolder("选择要完整校验的备份包"); if (path is null) return; CheckPackageBox.Text = path;
+        await RunBusyAsync("正在读取清单并校验全部载荷…", async (progress, ct) =>
+        {
+            var package = await Task.Run(() => verifier.VerifyAsync(path, progress, ct), ct);
+            CheckResultsList.Items.Clear();
+            CheckResultsList.Items.Add($"文件完整性校验通过：{package.Manifest.FileCount:N0} 个文件，{FormatBytes(package.Manifest.TotalBytes)}。");
+            CheckResultsList.Items.Add("Codex 应用层验收仍待在目标系统手动完成。");
+        });
+    }
+
+    private void AcceptancePending_Click(object sender, RoutedEventArgs e)
+    {
+        CheckResultsList.Items.Add("待人工验收：启动 Codex，确认登录、会话、项目打开、技能加载、记忆读取和外围工具连接。此项尚未通过。");
+    }
+
+    private void ChooseJournal_Click(object sender, RoutedEventArgs e)
+    {
+        var dialog = new OpenFileDialog { Title = "选择恢复回滚日志", Filter = "JSON 日志 (*.json)|*.json|所有文件 (*.*)|*.*", CheckFileExists = true };
+        if (dialog.ShowDialog() == true) JournalPathBox.Text = dialog.FileName;
+    }
+
+    private async void RunRollback_Click(object sender, RoutedEventArgs e)
+    {
+        if (!File.Exists(JournalPathBox.Text)) { MessageBox.Show(this, "请选择有效的回滚日志。", "日志无效"); return; }
+        if (RollbackConfirmCheck.IsChecked != true) { MessageBox.Show(this, "请先确认回滚的修改风险。", "需要确认"); return; }
+        if (MessageBox.Show(this, "回滚会按日志修改当前文件。确认继续？", "最终确认", MessageBoxButton.YesNo, MessageBoxImage.Warning) != MessageBoxResult.Yes) return;
+        var journal = JournalPathBox.Text;
+        await RunBusyAsync("正在按日志回滚…", async (_, ct) =>
+        {
+            await Task.Run(() => restoreEngine.RollbackAsync(journal, ct), ct);
+            ShowResult("回滚操作已完成", "已完成日志中的回滚步骤。请检查目标路径与 Codex 运行状态。", Path.GetDirectoryName(journal), []);
+        });
+    }
+
+    private async Task RunBusyAsync(string message, Func<IProgress<OperationProgress>, CancellationToken, Task> action)
+    {
+        if (operationCts is not null) return;
+        operationCts = new CancellationTokenSource(); BusyText.Text = message; BusyStats.Text = ""; BusyPanel.Visibility = Visibility.Visible;
+        foreach (var page in new[] { WelcomePage, HomePage, BackupPage, RestorePage, CheckPage, ResultPage }) page.IsEnabled = false;
+        var progress = new Progress<OperationProgress>(p => { BusyText.Text = p.Message; BusyStats.Text = p.TotalBytes is > 0 ? $"{p.Files:N0} 个文件 · {FormatBytes(p.Bytes)} / {FormatBytes(p.TotalBytes.Value)}" : $"{p.Phase} · {p.Files:N0} 个文件"; });
+        try { await action(progress, operationCts.Token); StatusText.Text = "操作结束"; }
+        catch (OperationCanceledException) { StatusText.Text = "操作已取消；未完成结果不会被视为成功"; MessageBox.Show(this, "操作已取消。备份中的未完成目录不能用于正式恢复；恢复过程中已完成的步骤请通过日志检查或回滚。", "已取消", MessageBoxButton.OK, MessageBoxImage.Information); }
+        catch (Exception ex) { StatusText.Text = "操作失败"; MessageBox.Show(this, UserMessage(ex), "操作未完成", MessageBoxButton.OK, MessageBoxImage.Error); }
+        finally { operationCts.Dispose(); operationCts = null; BusyPanel.Visibility = Visibility.Collapsed; foreach (var page in new[] { WelcomePage, HomePage, BackupPage, RestorePage, CheckPage, ResultPage }) page.IsEnabled = true; }
+    }
+
+    private void Cancel_Click(object sender, RoutedEventArgs e) { BusyText.Text = "正在请求安全取消…"; operationCts?.Cancel(); }
+    private void Window_Closing(object? sender, CancelEventArgs e)
+    {
+        if (operationCts is null) return;
+        e.Cancel = true;
+        if (MessageBox.Show(this, "操作仍在进行。要请求安全取消吗？窗口会保持打开，直到操作响应取消。", "操作进行中", MessageBoxButton.YesNo, MessageBoxImage.Warning) == MessageBoxResult.Yes) operationCts.Cancel();
+    }
+
+    private void ShowResult(string title, string summary, string? path, IEnumerable<string> details)
+    {
+        resultPath = path; ResultTitle.Text = title; ResultSummary.Text = summary; ResultDetails.Items.Clear(); foreach (var detail in details) ResultDetails.Items.Add(detail);
+        OpenReportButton.IsEnabled = !string.IsNullOrWhiteSpace(path); ShowPage(ResultPage);
+    }
+
+    private void OpenResult_Click(object sender, RoutedEventArgs e)
+    {
+        if (string.IsNullOrWhiteSpace(resultPath)) return;
+        var target = Directory.Exists(resultPath) ? resultPath : Path.GetDirectoryName(resultPath);
+        if (target is not null && Directory.Exists(target)) Process.Start(new ProcessStartInfo("explorer.exe", target) { UseShellExecute = true });
+    }
+
+    private static bool IsCurrentProcessLocation(string path)
+    {
+        try
+        {
+            var target = Path.GetFullPath(path).TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
+            var app = Path.GetFullPath(AppContext.BaseDirectory).TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
+            return target.StartsWith(app, StringComparison.OrdinalIgnoreCase) || app.StartsWith(target, StringComparison.OrdinalIgnoreCase);
+        }
+        catch { return true; }
+    }
+
+    private static string SafeName(string name, string fallback)
+    {
+        var invalid = Path.GetInvalidFileNameChars(); var value = new string(name.Select(c => invalid.Contains(c) ? '_' : c).ToArray()).Trim();
+        return string.IsNullOrWhiteSpace(value) ? fallback : value;
+    }
+
+    private static string FormatFinding(Finding f) => $"[{(f.Level == FindingLevel.Blocker ? "阻断" : f.Level == FindingLevel.Warning ? "警告" : "信息")}] {f.Message}{(string.IsNullOrWhiteSpace(f.Path) ? "" : " · " + f.Path)}";
+    private static string FormatBytes(long bytes) => bytes >= 1L << 30 ? $"{bytes / (double)(1L << 30):N2} GiB" : bytes >= 1L << 20 ? $"{bytes / (double)(1L << 20):N2} MiB" : $"{bytes / 1024d:N1} KiB";
+    private static string UserMessage(Exception ex) => ex switch
+    {
+        BackupException => ex.Message,
+        UnauthorizedAccessException => "没有访问所选路径的权限。请检查权限并重试。",
+        IOException => "文件系统操作失败，可能存在占用、空间不足或设备断开。",
+        _ => $"{ex.GetType().Name}：{ex.Message}"
+    };
+}
+
+public sealed class MappingRow
+{
+    public MappingRow(string rootId, string originalPath, string targetPath, SourceKind kind)
+    {
+        RootId = rootId; OriginalPath = originalPath; TargetPath = targetPath; Kind = kind;
+    }
+    public string RootId { get; }
+    public string OriginalPath { get; }
+    public string TargetPath { get; set; }
+    public SourceKind Kind { get; }
+    public string KindText => SourceKindChineseConverter.ToChinese(Kind);
+    public bool Selected { get; set; } = true;
+}
+
+public sealed class SourceKindChineseConverter : IValueConverter
+{
+    public object Convert(object value, Type targetType, object parameter, CultureInfo culture) => value is SourceKind kind ? ToChinese(kind) : "未知";
+    public object ConvertBack(object value, Type targetType, object parameter, CultureInfo culture) => Binding.DoNothing;
+    public static string ToChinese(SourceKind kind) => kind switch
+    {
+        SourceKind.Core => "核心", SourceKind.Project => "项目", SourceKind.Memory => "记忆",
+        SourceKind.Skill => "技能", SourceKind.Plugin => "插件", SourceKind.Tool => "工具",
+        SourceKind.Application => "应用", SourceKind.Environment => "环境", SourceKind.Custom => "自定义",
+        _ => "未知"
+    };
+}
