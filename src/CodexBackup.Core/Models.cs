@@ -1,0 +1,100 @@
+namespace CodexBackup.Core;
+
+public enum SourceKind { Core, Project, Memory, Skill, Plugin, Tool, Application, Environment, Custom }
+public enum FindingLevel { Info, Warning, Blocker }
+public sealed record Finding(FindingLevel Level, string Code, string Message, string? Path = null);
+
+public sealed class SourceItem
+{
+    public string Id { get; set; } = Guid.NewGuid().ToString("N");
+    public string Name { get; set; } = "";
+    public string Path { get; set; } = "";
+    public SourceKind Kind { get; set; }
+    public bool Required { get; set; }
+    public bool Selected { get; set; } = true;
+    public bool Exists { get; set; }
+    public bool IsDirectory { get; set; } = true;
+    public string Reason { get; set; } = "";
+    public string DiscoveredBy { get; set; } = "";
+    public string Notes { get; set; } = "";
+    public long? EstimatedBytes { get; set; }
+    public DateTimeOffset? LastModifiedUtc { get; set; }
+    public DateTimeOffset? LastActivityUtc { get; set; }
+    public List<string> DependencyIds { get; set; } = [];
+}
+
+public sealed class ScanResult
+{
+    public string UserProfile { get; set; } = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+    public string UserName { get; set; } = Environment.UserName;
+    public string MachineName { get; set; } = Environment.MachineName;
+    public List<SourceItem> Items { get; set; } = [];
+    public List<Finding> Findings { get; set; } = [];
+    public List<string> InstallationPaths { get; set; } = [];
+    public string CodexVersion { get; set; } = "未知";
+}
+
+public sealed record OperationProgress(string Phase, string Message, long Files = 0, long Bytes = 0, long? TotalBytes = null);
+public sealed class BackupRequest
+{
+    public List<SourceItem> Sources { get; set; } = [];
+    public string DestinationDirectory { get; set; } = "";
+    public List<string> CoverageNotes { get; set; } = [];
+}
+public sealed record BackupResult(string PackagePath, BackupManifest Manifest);
+
+public sealed class BackupManifest
+{
+    public int FormatVersion { get; set; } = 1;
+    public string ToolVersion { get; set; } = "0.1.0-preview";
+    public string BackupId { get; set; } = Guid.NewGuid().ToString("N");
+    public DateTimeOffset CreatedUtc { get; set; } = DateTimeOffset.UtcNow;
+    public string SourceProfile { get; set; } = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+    public string SourceUser { get; set; } = Environment.UserName;
+    public string SourceMachine { get; set; } = Environment.MachineName;
+    public List<BackupRoot> Roots { get; set; } = [];
+    public List<string> Exclusions { get; set; } = [];
+    public List<string> CoverageNotes { get; set; } = [];
+    public long FileCount { get; set; }
+    public long TotalBytes { get; set; }
+}
+public sealed class BackupRoot
+{
+    public string Id { get; set; } = "";
+    public string Name { get; set; } = "";
+    public string OriginalPath { get; set; } = "";
+    public bool IsDirectory { get; set; }
+    public SourceKind Kind { get; set; }
+    public List<string> SourceIds { get; set; } = [];
+}
+public sealed class FileRecord
+{
+    public string Id { get; set; } = "";
+    public string RootId { get; set; } = "";
+    public string RelativePath { get; set; } = "";
+    public bool IsDirectory { get; set; }
+    public long Length { get; set; }
+    public string Sha256 { get; set; } = "";
+    public long LastWriteUtcTicks { get; set; }
+    public int Attributes { get; set; }
+}
+public sealed record VerifiedPackage(string PackagePath, BackupManifest Manifest, IReadOnlyList<FileRecord> Files);
+public sealed class RestoreMapping
+{
+    public string RootId { get; set; } = "";
+    public string TargetPath { get; set; } = "";
+}
+public sealed class RestoreRequest
+{
+    public string PackagePath { get; set; } = "";
+    public List<RestoreMapping> Mappings { get; set; } = [];
+    public bool ReplaceExisting { get; set; }
+    public bool Isolated { get; set; } = true;
+}
+public sealed record RestorePreview(IReadOnlyList<RestorePreviewItem> Items, IReadOnlyList<Finding> Findings, long TotalBytes)
+{
+    public bool CanProceed => !Findings.Any(f => f.Level == FindingLevel.Blocker);
+}
+public sealed record RestorePreviewItem(string RootId, string SourceName, string TargetPath, bool Exists, string Action);
+public sealed record RestoreResult(string JournalPath, List<string> RestoredPaths, List<string> RollbackPaths, List<string> Notes);
+public sealed class BackupException(string message) : Exception(message);
