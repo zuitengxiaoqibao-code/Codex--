@@ -163,8 +163,11 @@ public sealed class RestoreEngine
         var notes = preview.Findings.Select(f => f.Message).ToList();
         notes.AddRange(adaptationNotes);
         if(request.RequireCompleteMigration)notes.Add("完整迁移的会话正文与源码目录关联已在暂存及最终位置检查；项目运行环境和 Codex 界面仍需实际打开验收。");
-        notes.Add("文件层恢复校验通过；Codex 会话显示、登录、记忆读取和项目运行仍需人工验收。");
-        return new(journalPath, journal.Entries.Select(e => e.Target).ToList(), journal.Entries.Where(e => e.HadOriginal).Select(e => e.Rollback).ToList(), notes);
+        var acceptance = RestoreAcceptance.Validate(package, request, journal.Entries.ToDictionary(e => e.RootId, e => e.Target, StringComparer.Ordinal));
+        notes.Add(acceptance.Summary);
+        notes.AddRange(acceptance.Checks.Where(c => c.Level == FindingLevel.Blocker).Select(c => c.Message));
+        notes.Add("Codex 登录、侧栏会话、记忆读取和项目运行仍需人工验收；配置、技能、插件及外围工具不会自动启用。");
+        return new(journalPath, journal.Entries.Select(e => e.Target).ToList(), journal.Entries.Where(e => e.HadOriginal).Select(e => e.Rollback).ToList(), notes, acceptance);
         }
         catch (Exception ex)
         {

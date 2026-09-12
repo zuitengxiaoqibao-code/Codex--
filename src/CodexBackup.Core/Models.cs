@@ -132,5 +132,5 @@ public sealed record RestorePreview(IReadOnlyList<RestorePreviewItem> Items, IRe
     public bool CanProceed => !Findings.Any(f => f.Level == FindingLevel.Blocker);
 }
 public sealed record RestorePreviewItem(string RootId, string SourceName, string TargetPath, bool Exists, string Action);
-public sealed record RestoreResult(string JournalPath, List<string> RestoredPaths, List<string> RollbackPaths, List<string> Notes);
+public sealed record RestoreResult(string JournalPath, List<string> RestoredPaths, List<string> RollbackPaths, List<string> Notes, RestoreAcceptanceReport? Acceptance = null);
 public sealed class BackupException(string message) : Exception(message);
