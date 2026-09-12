@@ -577,7 +577,8 @@ public sealed class DiscoveryService
         return (lines, truncated);
     }
 
-    private static bool LooksLikeCoreRoot(string path) => File.Exists(Path.Combine(path, "config.toml")) || Directory.Exists(Path.Combine(path, "sessions")) || EnumerateTopFiles(path, ["state*.sqlite"]).Any();
+    private static bool LooksLikeCoreRoot(string path) => File.Exists(Path.Combine(path, "config.toml")) || Directory.Exists(Path.Combine(path, "sessions")) ||
+        EnumerateTopFiles(path, ["state*.sqlite", "logs*.sqlite", "goals*.sqlite", "memories*.sqlite", "queue*.sqlite", "thread_history*.sqlite"]).Any();
 
     private string ResolveConfiguredPath(string value, string baseDirectory)
     {

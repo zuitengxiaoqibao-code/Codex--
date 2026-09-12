@@ -304,6 +304,32 @@ public class DiscoveryTests
     }
 
     [Fact]
+    public async Task AdditionalSearchRecognizesCoreContainingOnlyOfficialThreadHistoryDatabase()
+    {
+        using var t = new TestTree();
+        var profile = t.Dir("profile");
+        var search = t.Dir("other-drive");
+        var core = t.Dir("other-drive/custom-codex");
+        var project = t.Dir("other-drive/project");
+        var transcript = t.Write("other-drive/rollouts/thread.jsonl", "{}\n");
+        SQLitePCL.Batteries_V2.Init();
+        using (var connection = new SqliteConnection($"Data Source={Path.Combine(core, "thread_history_1.sqlite")}"))
+        {
+            connection.Open();
+            using var command = connection.CreateCommand();
+            command.CommandText = "CREATE TABLE threads (id TEXT, cwd TEXT, rollout_path TEXT); INSERT INTO threads VALUES ('nested-history',$cwd,$rollout)";
+            command.Parameters.AddWithValue("$cwd", project);
+            command.Parameters.AddWithValue("$rollout", transcript);
+            command.ExecuteNonQuery();
+        }
+
+        var result = await new DiscoveryService().ScanAsync(profile, additionalRoots: [search]);
+
+        Assert.Contains(result.Items, x => x.Kind == SourceKind.Core && x.Path == Path.GetFullPath(core) && x.Required);
+        Assert.Contains(result.Sessions, x => x.Id == "nested-history");
+    }
+
+    [Fact]
     public async Task ConcurrentScansOnOneServiceKeepProfilesIsolated()
     {
         using var t = new TestTree(); var first = t.Dir("first"); var second = t.Dir("second");
