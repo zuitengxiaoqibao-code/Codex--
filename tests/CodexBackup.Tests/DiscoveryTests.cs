@@ -406,5 +406,18 @@ public class DiscoveryTests
         Assert.Contains(result.Findings, x => x.Code == "required-codex-root-missing" && x.Path == missingDefault);
     }
 
+    [Fact]
+    public async Task ManagedRequirementsTomlIsListedForMigrationReview()
+    {
+        using var t = new TestTree();
+        var profile = t.Dir("profile");
+        var core = t.Dir("profile/.codex");
+        var requirements = t.Write("profile/.codex/requirements.toml", "allow_managed_hooks_only = true\n");
+
+        var result = await new DiscoveryService().ScanAsync(profile);
+
+        Assert.Contains(result.EnvironmentManifest.Entries, entry => entry.DisplayName == "requirements.toml" && entry.SourcePath == Path.GetFullPath(requirements));
+    }
+
     private static string Json(string value) => value.Replace("\\", "\\\\");
 }

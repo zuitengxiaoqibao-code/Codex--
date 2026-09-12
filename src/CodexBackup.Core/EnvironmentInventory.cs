@@ -25,7 +25,8 @@ public static class EnvironmentInventory
         "requirements.txt", "pyproject.toml", "poetry.lock", "Pipfile.lock",
         "package.json", "package-lock.json", "npm-shrinkwrap.json", "pnpm-lock.yaml", "yarn.lock",
         "Cargo.toml", "Cargo.lock", "go.mod", "go.sum", "pom.xml", "build.gradle",
-        "global.json", "Directory.Build.props", ".gitmodules", ".gitattributes"
+        "global.json", "Directory.Build.props", ".gitmodules", ".gitattributes",
+        "config.toml", "requirements.toml"
     ];
 
     public static EnvironmentManifest Collect(string profile, IReadOnlyList<SourceItem> items, CancellationToken cancellationToken = default)
