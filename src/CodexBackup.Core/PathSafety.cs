@@ -69,10 +69,10 @@ public static class PathSafety
     public static void RejectSystemTarget(string path)
     {
         var full = Full(path);
-        var blocked = new[] { Path.GetPathRoot(full)!, Environment.GetFolderPath(Environment.SpecialFolder.Windows), Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86), Environment.GetFolderPath(Environment.SpecialFolder.UserProfile) };
+        var blocked = new[] { Path.GetPathRoot(full)!, Environment.GetFolderPath(Environment.SpecialFolder.Windows), Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86), Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), Environment.GetFolderPath(Environment.SpecialFolder.UserProfile) };
         if (blocked.Any(b => !string.IsNullOrEmpty(b) && string.Equals(Full(b), full, StringComparison.OrdinalIgnoreCase)))
-            throw new BackupException("不能替换磁盘根目录、Windows、Program Files 或整个用户目录。");
-        foreach (var systemRoot in new[] { Environment.GetFolderPath(Environment.SpecialFolder.Windows), Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86) })
-            if (!string.IsNullOrEmpty(systemRoot) && Contains(systemRoot, full)) throw new BackupException("不能恢复到 Windows 或 Program Files 系统目录内部。");
+            throw new BackupException("不能替换磁盘根目录、Windows、Program Files、ProgramData 或整个用户目录。");
+        foreach (var systemRoot in new[] { Environment.GetFolderPath(Environment.SpecialFolder.Windows), Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86), Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData) })
+            if (!string.IsNullOrEmpty(systemRoot) && Contains(systemRoot, full)) throw new BackupException("不能恢复到 Windows、Program Files 或 ProgramData 系统目录内部；请先恢复到普通文件夹并人工核对。");
     }
 }

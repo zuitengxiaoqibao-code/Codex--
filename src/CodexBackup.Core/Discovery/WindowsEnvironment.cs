@@ -9,6 +9,22 @@ namespace CodexBackup.Core;
 public static class WindowsEnvironment
 {
     public sealed record InstalledPackage(string Name, string Version, string InstallLocation);
+    public sealed record CodexSystemConfigPaths(string ConfigPath, string RequirementsPath);
+
+    /// <summary>
+    /// Returns the documented Windows system configuration layer locations.
+    /// The optional base path keeps this pure and testable while production uses
+    /// the Windows common application data folder (normally %ProgramData%).
+    /// </summary>
+    public static CodexSystemConfigPaths GetCodexSystemConfigPaths(string? commonApplicationData = null)
+    {
+        var basePath = string.IsNullOrWhiteSpace(commonApplicationData)
+            ? Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData)
+            : commonApplicationData;
+        if (string.IsNullOrWhiteSpace(basePath)) basePath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), "..", "ProgramData");
+        var root = Path.Combine(Path.GetFullPath(basePath), "OpenAI", "Codex");
+        return new(Path.Combine(root, "config.toml"), Path.Combine(root, "requirements.toml"));
+    }
 
     public static IReadOnlyList<InstalledPackage> GetInstalledCodexMsixPackages(CancellationToken cancellationToken, out string? warning)
     {

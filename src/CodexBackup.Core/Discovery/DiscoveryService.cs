@@ -48,6 +48,16 @@ public sealed class DiscoveryService
         foreach (var root in additionalRoots ?? []) ScanAdditionalRoot(root, cancellationToken);
         FinalizeCoreRequirement(defaultCorePath);
 
+        if (includeProcessEnvironment)
+        {
+            foreach (var scope in new[] { EnvironmentVariableTarget.Process, EnvironmentVariableTarget.User, EnvironmentVariableTarget.Machine })
+            {
+                var sqliteHome = Environment.GetEnvironmentVariable("CODEX_SQLITE_HOME", scope);
+                if (!string.IsNullOrWhiteSpace(sqliteHome)) ScanSqliteLocation(sqliteHome, $"{scope} 级 CODEX_SQLITE_HOME 环境变量", cancellationToken, true);
+            }
+            ScanSystemConfigLocations(cancellationToken);
+        }
+
         ScanProfileLocations(selectedProfile, cancellationToken);
         if (includeProcessEnvironment)
         {
@@ -193,10 +203,50 @@ public sealed class DiscoveryService
             var name = Path.GetFileName(file);
             if (name.Contains("config", StringComparison.OrdinalIgnoreCase) || name.Contains("project", StringComparison.OrdinalIgnoreCase) || name.Contains("global-state", StringComparison.OrdinalIgnoreCase)) ScanJson(file);
         }
-        foreach (var file in EnumerateTopFiles(root, ["state*.sqlite", "*.db"])) ScanSqlite(file, root, token);
+        foreach (var file in EnumerateTopFiles(root, ["*.sqlite", "*.db"])) ScanSqlite(file, root, token);
         if (Directory.Exists(Path.Combine(root, "sqlite")))
             foreach (var file in EnumerateTopFiles(Path.Combine(root, "sqlite"), ["*.db", "*.sqlite"])) ScanSqlite(file, root, token);
         ScanConfigReferences(root, root, token);
+    }
+
+    private void ScanSystemConfigLocations(CancellationToken token)
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        var paths = WindowsEnvironment.GetCodexSystemConfigPaths();
+        var systemRoot = Path.GetDirectoryName(paths.ConfigPath)!;
+        var found = false;
+        foreach (var (path, name, description) in new[]
+        {
+            (paths.ConfigPath, "系统级 Codex 默认配置", "官方配置层：%ProgramData%\\OpenAI\\Codex\\config.toml"),
+            (paths.RequirementsPath, "系统级 Codex 强制要求", "官方受管配置层：%ProgramData%\\OpenAI\\Codex\\requirements.toml")
+        })
+        {
+            token.ThrowIfCancellationRequested();
+            if (!File.Exists(path)) continue;
+            found = true;
+            Add(name, path, SourceKind.Environment, true, description);
+        }
+        if (found) ScanConfigReferences(systemRoot, Path.Combine(selectedProfile, ".codex"), token);
+    }
+
+    private void ScanSqliteLocation(string path, string evidence, CancellationToken token, bool required)
+    {
+        string full;
+        try { full = ResolveConfiguredPath(path, selectedProfile); }
+        catch (Exception ex) { findings.Add(new(FindingLevel.Blocker, "configured-sqlite-home-invalid", $"Codex SQLite 状态目录配置无效（{ex.GetType().Name}）。", path)); return; }
+        var item = Add("Codex SQLite 状态目录", full, SourceKind.Environment, required, evidence);
+        if (!item.Exists)
+        {
+            findings.Add(new(required ? FindingLevel.Blocker : FindingLevel.Warning, "configured-sqlite-home-missing", "Codex 配置指定的 SQLite 状态目录不存在或不可访问。", full));
+            return;
+        }
+        if (!item.IsDirectory)
+        {
+            findings.Add(new(FindingLevel.Blocker, "configured-sqlite-home-not-directory", "Codex SQLite 状态位置必须是目录。", full));
+            return;
+        }
+        var sessionCore = items.FirstOrDefault(x => x.Kind == SourceKind.Core && x.Exists)?.Path ?? Path.Combine(selectedProfile, ".codex");
+        foreach (var file in EnumerateTopFiles(full, ["*.sqlite", "*.db"])) ScanSqlite(file, sessionCore, token);
     }
 
     private void ScanProfileLocations(string profile, CancellationToken token)
@@ -378,7 +428,7 @@ public sealed class DiscoveryService
 
     private void ScanConfigReferences(string root, string corePath, CancellationToken token)
     {
-        foreach (var name in new[] { "config.toml", "config.yaml", "config.yml" })
+        foreach (var name in new[] { "config.toml", "requirements.toml", "managed_config.toml", "config.yaml", "config.yml" })
         {
             var file = Path.Combine(root, name); if (!File.Exists(file)) continue;
             try
@@ -397,6 +447,9 @@ public sealed class DiscoveryService
                     var kind = key switch
                     {
                         "codex_home" or "data_dir" or "data_root" or "codex_dir" => "core",
+                        "sqlite_home" => "sqlite",
+                        "log_dir" => "log",
+                        "model_instructions_file" or "js_repl_node_module_dirs" => "environment",
                         "sessions_dir" or "session_dir" or "sessions_root" or "session_root" => "session",
                         "project_path" or "project_root" or "workspace" or "workspace_path" or "workspace_root" or "cwd" => "project",
                         _ => ""
@@ -406,6 +459,17 @@ public sealed class DiscoveryService
                     {
                         var configured = ResolveConfiguredPath(UnescapeConfig(quoted.Groups["path"].Value), Path.GetDirectoryName(file)!);
                         if (kind == "core") ScanCoreRoot(configured, $"配置的 Codex 数据目录：{file}", token);
+                        else if (kind == "sqlite") ScanSqliteLocation(configured, $"配置的 SQLite 状态目录：{file}", token, true);
+                        else if (kind == "log")
+                        {
+                            var log = Add("Codex 日志目录", configured, SourceKind.Environment, true, $"配置的日志目录：{file}");
+                            if (!log.Exists) findings.Add(new(FindingLevel.Warning, "configured-log-dir-missing", "Codex 配置指定的日志目录不存在；日志无法随本次备份确认。", configured));
+                        }
+                        else if (kind == "environment")
+                        {
+                            var external = Add("Codex 配置引用的外部文件", configured, SourceKind.Environment, true, $"配置路径引用：{file}");
+                            if (!external.Exists) findings.Add(new(FindingLevel.Warning, "configured-external-path-missing", "Codex 配置引用的外部文件或目录不存在；恢复后需要重新定位。", configured));
+                        }
                         else if (kind == "session")
                         {
                             var source = Add("配置的会话目录", configured, SourceKind.Session, true, $"配置文件：{file}");

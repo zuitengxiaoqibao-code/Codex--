@@ -20,6 +20,12 @@ public static class UserGuidance
     {
         var code = finding.Code;
         var location = string.IsNullOrWhiteSpace(finding.Path) ? "" : "\n位置：" + finding.Path;
+        if (code.StartsWith("configured-sqlite-home", StringComparison.Ordinal))
+            return "Codex 的会话索引在单独的 SQLite 状态目录中\n影响：只保存默认 .codex 文件夹会漏掉会话索引，恢复后可能看不到历史会话。\n处理：确认这个目录仍在原硬盘上；如果目录已搬走，请定位实际目录后重新扫描。" + location;
+        if (code == "configured-log-dir-missing")
+            return "Codex 指定的日志目录找不到\n影响：历史日志不能确认已随备份保存，但不会替代会话正文。\n处理：确认原硬盘已连接；如果不需要日志，可在自选 / 抢救模式中继续保存其他内容。" + location;
+        if (code == "configured-external-path-missing")
+            return "配置引用了一个外部文件或目录，但现在找不到\n影响：依赖这个文件的模型指令或运行设置，恢复后可能需要重新定位。\n处理：接回原硬盘或使用“定位已搬走的文件”选择它现在的位置。" + location;
         if (code.Contains("missing")) return "找不到原来的文件\n影响：对应项目或会话可能无法恢复，不能把缺失内容算作已备份。\n处理：接上原硬盘，或在来源列表选中该项，点击“定位已搬走的文件”。" + location;
         if (code == "active-writers" || code.Contains("wal")) return "Codex 还在使用数据\n影响：刚产生的会话或项目记录可能尚未保存完整。\n处理：正常退出 Codex、终端任务和桥接工具后，点击“重新扫描”。本工具不会替你强制关闭程序。" + location;
         if (code == "coverage-boundary") return "还有需要单独确认的内容\n网络电脑、云端任务、WSL、Docker 和其他 Windows 用户不属于本机目录扫描。若你使用过它们，请先导出到本地，再添加到备份。";

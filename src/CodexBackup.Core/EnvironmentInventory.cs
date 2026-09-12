@@ -57,6 +57,10 @@ public static class EnvironmentInventory
             if (Directory.Exists(git) || File.Exists(git)) Add(manifest, "Git", ".git", "项目包含 Git 关联，恢复时按路径映射检查", git, "重要");
         }
 
+        foreach (var config in items.Where(x => x.Exists && !x.IsDirectory && x.Kind == SourceKind.Environment &&
+                     Path.GetFileName(x.Path) is "config.toml" or "requirements.toml" or "managed_config.toml"))
+            Add(manifest, "Codex 配置层", Path.GetFileName(config.Path), "已列入备份；新系统需按来源版本和管理员策略重新核对", config.Path, config.Path.EndsWith("requirements.toml", StringComparison.OrdinalIgnoreCase) ? "需核查" : "重要");
+
         var knownPaths = new[]
         {
             ("WSL/Docker", "WSL 配置", Path.Combine(profile, ".wslconfig")),
@@ -76,6 +80,7 @@ public static class EnvironmentInventory
         Add(manifest, "计划任务", "Windows 计划任务", "未自动读取或恢复；请根据项目清单人工核对", null, "需核查");
         Add(manifest, "端口", "本机监听端口", "未自动读取或恢复；请根据项目清单人工核对", null, "需核查");
         Add(manifest, "文件关联", "Windows 文件关联", "未自动修改；新系统需按项目需要重新注册", null, "需核查");
+        Add(manifest, "Codex 配置层", "云端或组织受管配置", "官方配置可能由云端、MDM 或域策略提供；本工具不会下载、复制或自动启用它", null, "需核查");
         return manifest;
     }
 

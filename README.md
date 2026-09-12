@@ -1,4 +1,4 @@
-# Codex Backup (Windows 0.3 preview)
+# Codex Backup (Windows 0.3.1 preview)
 
 Offline .NET 10 / WPF backup, restore and verification tool with a Chinese UI. It follows the configured `CODEX_HOME`, session references and project paths across local drives; it does not assume that Codex lives on `C:`.
 
@@ -30,13 +30,15 @@ The restore wizard requires an explicit primary Core when a package contains mul
 
 Password-protected packages use a chunked authenticated AES-GCM envelope. The password is held only in memory, is never written to `manifest.json` or reports, and cannot be recovered if lost. Keep two copies on different physical media and perform a second verification before deleting the old system.
 
-The official Codex repository documents configuration as `config.toml` plus managed `requirements.toml` layers and directs users to the online configuration reference. The online reference may be unavailable behind access controls; fields that this tool cannot verify locally are reported as unknown and are not auto-restored.
+The official Codex repository documents configuration as layered `config.toml` files plus managed `requirements.toml`. On Windows the system layer is `%ProgramData%\OpenAI\Codex\config.toml` and `%ProgramData%\OpenAI\Codex\requirements.toml`; the user layer is `${CODEX_HOME}/config.toml`, with project `.codex/config.toml` and optional profile files above it. The state runtime can be moved independently with `CODEX_SQLITE_HOME` or `sqlite_home`, and the tool inventories that directory plus `log_dir` references. The online reference may be unavailable behind access controls; fields that this tool cannot verify locally are reported as unknown and are not auto-restored.
+
+System-level files are backed up when readable but are never written directly to `ProgramData` during restore. Cloud, MDM, domain policy, keyring credentials and other external services must be re-established on the new system by the user or administrator.
 
 Release checks:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\verify-release.ps1 -ReleaseDirectory C:\path\to\outputs\v0.3
-powershell -ExecutionPolicy Bypass -File .\scripts\sign-release.ps1 -ReleaseDirectory C:\path\to\outputs\v0.3
+powershell -ExecutionPolicy Bypass -File .\scripts\verify-release.ps1 -ReleaseDirectory C:\path\to\outputs\v0.3.1
+powershell -ExecutionPolicy Bypass -File .\scripts\sign-release.ps1 -ReleaseDirectory C:\path\to\outputs\v0.3.1
 ```
 
 ## Safety and acceptance

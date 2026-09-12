@@ -14,4 +14,11 @@ public class SystemTargetTests
             if (!string.IsNullOrEmpty(path)) Assert.Throws<BackupException>(() => PathSafety.RejectSystemTarget(Path.Combine(path, "SyntheticNeverCreated")));
         }
     }
+
+    [Fact]
+    public void RejectsProgramDataDescendantsSoManagedCodexConfigIsNeverAutoActivated()
+    {
+        var path = Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData);
+        if (!string.IsNullOrEmpty(path)) Assert.Throws<BackupException>(() => PathSafety.RejectSystemTarget(Path.Combine(path, "OpenAI", "Codex", "config.toml")));
+    }
 }

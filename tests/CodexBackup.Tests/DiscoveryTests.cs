@@ -238,6 +238,72 @@ public class DiscoveryTests
     }
 
     [Fact]
+    public void OfficialWindowsSystemConfigPathsUseProgramDataOpenAiCodex()
+    {
+        var paths = WindowsEnvironment.GetCodexSystemConfigPaths(Path.Combine("C:\\ProgramData"));
+
+        Assert.Equal(Path.Combine("C:\\ProgramData", "OpenAI", "Codex", "config.toml"), paths.ConfigPath);
+        Assert.Equal(Path.Combine("C:\\ProgramData", "OpenAI", "Codex", "requirements.toml"), paths.RequirementsPath);
+    }
+
+    [Fact]
+    public async Task ConfigExternalStateAndLogDirectoriesBecomeRequiredSources()
+    {
+        using var t = new TestTree();
+        var profile = t.Dir("profile");
+        var core = t.Dir("profile/.codex");
+        var sqliteHome = t.Dir("data/sqlite");
+        var logDir = t.Dir("data/logs");
+        t.Write("profile/.codex/config.toml", $"sqlite_home = '{sqliteHome.Replace("\\", "\\\\")}'\nlog_dir = '{logDir.Replace("\\", "\\\\")}'\n");
+
+        var result = await new DiscoveryService().ScanAsync(profile);
+
+        Assert.Contains(result.Items, x => x.Path == Path.GetFullPath(sqliteHome) && x.Required && x.Kind == SourceKind.Environment);
+        Assert.Contains(result.Items, x => x.Path == Path.GetFullPath(logDir) && x.Required && x.Kind == SourceKind.Environment);
+    }
+
+    [Fact]
+    public async Task CodexSqliteHomeEnvironmentOverrideIsDiscovered()
+    {
+        using var t = new TestTree();
+        var sqliteHome = t.Dir("external-sqlite");
+        var prior = Environment.GetEnvironmentVariable("CODEX_SQLITE_HOME");
+        try
+        {
+            Environment.SetEnvironmentVariable("CODEX_SQLITE_HOME", sqliteHome);
+            var result = await new DiscoveryService().ScanAsync(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile));
+            Assert.Contains(result.Items, x => x.Kind == SourceKind.Environment && x.Required && x.Path == Path.GetFullPath(sqliteHome));
+        }
+        finally { Environment.SetEnvironmentVariable("CODEX_SQLITE_HOME", prior); }
+    }
+
+    [Fact]
+    public async Task RuntimeThreadHistoryDatabaseCreatesSessionReference()
+    {
+        using var t = new TestTree();
+        var profile = t.Dir("profile");
+        var core = t.Dir("profile/.codex");
+        var project = t.Dir("repo");
+        var transcript = t.Write("rollouts/thread.jsonl", "{}\n");
+        SQLitePCL.Batteries_V2.Init();
+        using (var connection = new SqliteConnection($"Data Source={Path.Combine(core, "thread_history_1.sqlite")}"))
+        {
+            connection.Open();
+            using var command = connection.CreateCommand();
+            command.CommandText = "CREATE TABLE threads (id TEXT, title TEXT, cwd TEXT, rollout_path TEXT, updated_at INTEGER); INSERT INTO threads VALUES ('history-1','历史会话',$cwd,$rollout,1750000000)";
+            command.Parameters.AddWithValue("$cwd", project);
+            command.Parameters.AddWithValue("$rollout", transcript);
+            command.ExecuteNonQuery();
+        }
+
+        var result = await new DiscoveryService().ScanAsync(profile);
+
+        var session = Assert.Single(result.Sessions, x => x.Id == "history-1");
+        Assert.Equal(Path.GetFullPath(transcript), session.TranscriptPath);
+        Assert.Equal(Path.GetFullPath(project), session.ProjectPath);
+    }
+
+    [Fact]
     public async Task ConcurrentScansOnOneServiceKeepProfilesIsolated()
     {
         using var t = new TestTree(); var first = t.Dir("first"); var second = t.Dir("second");
