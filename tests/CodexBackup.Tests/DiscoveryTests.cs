@@ -7,6 +7,38 @@ namespace CodexBackup.Tests;
 
 public class DiscoveryTests
 {
+    [Fact]
+    public void EnvironmentInventoryRedactsSecretValuesButKeepsNames()
+    {
+        var manifest = EnvironmentInventory.CollectFromVariables([
+            new KeyValuePair<string, string?>("OPENAI_API_KEY", "sk-live-secret"),
+            new KeyValuePair<string, string?>("CODEX_HOME", "D:\\codex")
+        ]);
+
+        var serialized = System.Text.Json.JsonSerializer.Serialize(manifest);
+        Assert.Contains("OPENAI_API_KEY", serialized);
+        Assert.DoesNotContain("sk-live-secret", serialized);
+        Assert.DoesNotContain("D:\\codex", serialized);
+        Assert.Contains(manifest.Entries, x => x.DisplayName == "OPENAI_API_KEY" && x.Risk == "敏感");
+    }
+
+    [Fact]
+    public void EnvironmentInventoryListsProjectLockfilesWithoutRunningScripts()
+    {
+        using var t = new TestTree();
+        var project = t.Dir("project");
+        t.Write("project/package.json", "{\"scripts\":{\"preinstall\":\"echo SHOULD_NOT_RUN > marker.txt\"}}");
+        t.Write("project/package-lock.json", "{}");
+        t.Write("project/requirements.txt", "requests==2.0");
+        var item = t.Source("project"); item.Kind = SourceKind.Project;
+
+        var manifest = EnvironmentInventory.Collect(t.Root, [item]);
+
+        Assert.Contains(manifest.Entries, x => x.Category == "锁定文件" && x.SourcePath!.EndsWith("package-lock.json", StringComparison.OrdinalIgnoreCase));
+        Assert.Contains(manifest.Entries, x => x.Category == "锁定文件" && x.SourcePath!.EndsWith("requirements.txt", StringComparison.OrdinalIgnoreCase));
+        Assert.False(File.Exists(Path.Combine(project, "marker.txt")));
+    }
+
     [Theory]
     [InlineData(true)]
     [InlineData(false)]

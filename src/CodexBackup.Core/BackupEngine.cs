@@ -167,6 +167,7 @@ public sealed class BackupEngine
         File.WriteAllText(Path.Combine(reports, "summary.txt"), body, new UTF8Encoding(false));
         File.WriteAllText(Path.Combine(reports, "summary.html"), "<!doctype html><meta charset=utf-8><title>Codex 备份报告</title><style>body{font:16px 'Microsoft YaHei',sans-serif;max-width:960px;margin:48px auto;line-height:1.7}pre{white-space:pre-wrap;overflow-wrap:anywhere}</style><h1>Codex 备份报告</h1><pre>" + WebUtility.HtmlEncode(body) + "</pre>", new UTF8Encoding(false));
         FileIO.WriteJsonDurable(Path.Combine(reports, "exclusions.json"), manifest.Exclusions);
+        FileIO.WriteJsonDurable(Path.Combine(reports, "environment-report.json"), manifest.EnvironmentManifest);
     }
 }
 

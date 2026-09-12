@@ -75,6 +75,7 @@ public sealed class DiscoveryService
         result.Items = [.. items];
         result.Findings = [.. findings];
         result.Sessions = [.. sessions];
+        result.EnvironmentManifest = EnvironmentInventory.Collect(selectedProfile, result.Items, cancellationToken);
         progress?.Report(new("检测", $"发现 {items.Count} 项来源"));
         return Task.FromResult(result);
         }
