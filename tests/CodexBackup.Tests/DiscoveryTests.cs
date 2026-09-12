@@ -7,6 +7,20 @@ namespace CodexBackup.Tests;
 
 public class DiscoveryTests
 {
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task MetadataContractDoesNotConfuseLargeDialogueWithMissingMetadata(bool payload)
+    {
+        using var t=new TestTree();var profile=t.Dir("profile");var project=t.Dir("repo");
+        var fields="\"id\":\"a\",\"cwd\":\""+Json(project)+"\"";
+        var first=payload ? "{\"type\":\"session_meta\",\"payload\":{"+fields+"}}" : "{\"type\":\"session_meta\","+fields+"}";
+        t.Write("profile/.codex/sessions/a.jsonl",first+"\n"+new string('x',1100000));
+        var scan=await new DiscoveryService().ScanAsync(profile);
+        Assert.Single(scan.Sessions);
+        Assert.DoesNotContain(scan.Findings,f=>f.Code=="session-metadata-truncated");
+        Assert.Equal(!payload,scan.Findings.Any(f=>f.Code=="session-metadata-unsupported"));
+    }
     [Fact]
     public async Task AbsentOptionalLocationsAreNotSelectedAndProjectsCanBeDeselected()
     {
@@ -218,6 +232,146 @@ public class DiscoveryTests
 
         Assert.Contains(result.Items, x => x.Kind == SourceKind.Project && x.Path == Path.GetFullPath(project));
         Assert.DoesNotContain(result.Items, x => x.Kind == SourceKind.Project && x.Path.Contains(';'));
+    }
+
+    [Fact]
+    public async Task TomlQuotedProjectAndConfiguredSessionDirectoryProduceLinkedSession()
+    {
+        using var t = new TestTree(); var profile = t.Dir("profile"); t.Dir("profile/.codex");
+        var project = t.Dir("external/project"); var sessions = t.Dir("external/session-store");
+        var transcript = t.Write("external/session-store/2026/09/thread.jsonl",
+            "{\"type\":\"session_meta\",\"payload\":{\"id\":\"thread-1\",\"title\":\"迁移讨论\",\"cwd\":\"" + Json(project) + "\",\"timestamp\":\"2026-09-10T01:02:03Z\"}}\n{\"type\":\"message\",\"payload\":{\"text\":\"不得暴露\"}}");
+        t.Write("profile/.codex/config.toml", "[projects.'" + project.Replace("\\", "\\\\") + "']\ntrust_level = \"trusted\"\nsessions_dir = '" + sessions.Replace("\\", "\\\\") + "'");
+
+        var result = await new DiscoveryService().ScanAsync(profile);
+
+        Assert.Contains(result.Items, x => x.Kind == SourceKind.Project && x.Path == Path.GetFullPath(project) && !x.Required);
+        Assert.Contains(result.Items, x => x.Kind == SourceKind.Session && x.Path == Path.GetFullPath(transcript));
+        var session = Assert.Single(result.Sessions, x => x.Id == "thread-1");
+        Assert.Equal("迁移讨论", session.Title);
+        Assert.Equal(Path.GetFullPath(project), session.ProjectPath);
+        Assert.Equal(Path.GetFullPath(transcript), session.TranscriptPath);
+        Assert.Equal(Path.GetFullPath(Path.Combine(profile, ".codex")), session.CorePath);
+    }
+
+    [Fact]
+    public async Task SqliteRolloutPathCreatesSessionReferenceAndAdditionalRootIsScanned()
+    {
+        using var t = new TestTree(); var profile = t.Dir("profile"); var core = t.Dir("profile/.codex");
+        var project = t.Dir("elsewhere/source"); var transcript = t.Write("elsewhere/rollouts/a.jsonl", "{}\n");
+        var database = Path.Combine(core, "state.sqlite"); SQLitePCL.Batteries_V2.Init();
+        using (var connection = new SqliteConnection($"Data Source={database}"))
+        {
+            connection.Open(); using var command = connection.CreateCommand();
+            command.CommandText = "CREATE TABLE threads (id TEXT, title TEXT, cwd TEXT, rollout_path TEXT, updated_at INTEGER); INSERT INTO threads VALUES ('db-1','数据库会话',$cwd,$rollout,1750000000)";
+            command.Parameters.AddWithValue("$cwd", project); command.Parameters.AddWithValue("$rollout", transcript); command.ExecuteNonQuery();
+        }
+
+        var result = await new DiscoveryService().ScanAsync(profile, additionalRoots: [Path.GetDirectoryName(transcript)!]);
+
+        Assert.Contains(result.Items, x => x.Kind == SourceKind.Session && x.Path == Path.GetFullPath(transcript));
+        var session = Assert.Single(result.Sessions, x => x.Id == "db-1");
+        Assert.Equal("数据库会话", session.Title);
+        Assert.Equal(DateTimeOffset.FromUnixTimeSeconds(1750000000), session.LastActivityUtc);
+    }
+
+    [Fact]
+    public async Task AdditionalSearchParentFindsNestedCoreWithoutRequiringMissingDefaultOrParent()
+    {
+        using var t = new TestTree(); var profile = t.Dir("profile"); var search = t.Dir("search-drive");
+        var nestedCore = t.Dir("search-drive/user-data/.codex"); var project = t.Dir("search-drive/repos/demo");
+        t.Dir("search-drive/repos/demo/.git");
+        t.Write("search-drive/user-data/.codex/config.toml", "project_path = '" + project + "' # trailing comment");
+
+        var result = await new DiscoveryService().ScanAsync(profile, additionalRoots: [search]);
+
+        Assert.Contains(result.Items, x => x.Kind == SourceKind.Core && x.Path == Path.GetFullPath(nestedCore) && x.Required);
+        Assert.Contains(result.Items, x => x.Kind == SourceKind.Project && x.Path == Path.GetFullPath(project) && !x.Required);
+        Assert.DoesNotContain(result.Findings, x => x.Code == "required-codex-root-missing" && x.Path == Path.Combine(profile, ".codex"));
+        Assert.DoesNotContain(result.Items, x => x.Path == Path.GetFullPath(search) && x.Required);
+    }
+
+    [Fact]
+    public async Task GlobalRuntimeRootFieldsAreRecognizedButWritablePermissionRootsAreIgnored()
+    {
+        using var t = new TestTree(); var profile = t.Dir("profile"); t.Dir("profile/.codex");
+        var project = t.Dir("runtime-project"); var unrelated = t.Dir("permission-root");
+        t.Write("profile/.codex/.codex-global-state.json", "{\"runtimeWorkspaceRoots\":[\"" + Json(project) + "\"],\"permissions\":{\"writableRoots\":[\"" + Json(unrelated) + "\"]}}");
+
+        var result = await new DiscoveryService().ScanAsync(profile);
+
+        Assert.Contains(result.Items, x => x.Kind == SourceKind.Project && x.Path == Path.GetFullPath(project));
+        Assert.DoesNotContain(result.Items, x => x.Kind == SourceKind.Project && x.Path == Path.GetFullPath(unrelated));
+    }
+
+    [Fact]
+    public async Task ExplicitPathMapsExcludeArbitraryKeysAndSecretValues()
+    {
+        using var t = new TestTree(); var profile = t.Dir("profile"); t.Dir("profile/.codex");
+        var source = t.Dir("source"); var output = t.Dir("output"); var label = t.Dir("label"); var unrelated = t.Dir("unrelated");
+        t.Write("profile/.codex/.codex-global-state.json", System.Text.Json.JsonSerializer.Serialize(new Dictionary<string, object>
+        {
+            ["projectSources"] = new[] { source },
+            ["thread-projectless-output-directories"] = new Dictionary<string, string> { ["thread"] = output },
+            ["electron-workspace-root-labels"] = new Dictionary<string, string> { [label] = "Label" },
+            ["secret_workspace_root_value"] = unrelated,
+            ["secrets"] = new Dictionary<string, string> { [unrelated] = unrelated },
+            ["rootPaths"] = new { secret = unrelated }
+        }));
+
+        var result = await new DiscoveryService().ScanAsync(profile);
+
+        foreach (var expected in new[] { source, output, label }) Assert.Contains(result.Items, x => x.Kind == SourceKind.Project && x.Path == expected);
+        Assert.DoesNotContain(result.Items, x => x.Path == unrelated);
+    }
+
+    [Fact]
+    public async Task AdditionalSearchDepthLimitIsReportedAndMissingExplicitCoreStillBlocks()
+    {
+        using var t = new TestTree(); var profile = t.Dir("profile"); var core = t.Dir("profile/.codex");
+        var missing = Path.Combine(t.Root, "missing-core"); var search = t.Dir("search");
+        t.Dir("search/a/b/c/d/e/f");
+        t.Write("profile/.codex/config.toml", "codex_home = '" + missing + "'");
+
+        var result = await new DiscoveryService().ScanAsync(profile, additionalRoots: [search]);
+
+        Assert.Contains(result.Findings, x => x.Code == "additional-depth-limit");
+        Assert.Contains(result.Findings, x => x.Code == "required-codex-root-missing" && x.Path == missing);
+        Assert.DoesNotContain(result.Items, x => x.Path == search);
+    }
+
+    [Fact]
+    public async Task MissingSqliteTranscriptIsAFileAndLaterMetadataBlocksCompleteMigration()
+    {
+        using var t = new TestTree(); var profile = t.Dir("profile"); var core = t.Dir("profile/.codex");
+        var missing = Path.Combine(t.Root, "gone.jsonl");
+        SQLitePCL.Batteries_V2.Init();
+        using (var connection = new SqliteConnection($"Data Source={Path.Combine(core, "state.sqlite")}"))
+        {
+            connection.Open(); using var command = connection.CreateCommand();
+            command.CommandText = "CREATE TABLE threads (id TEXT, rollout_path TEXT); INSERT INTO threads VALUES ('missing', $path)";
+            command.Parameters.AddWithValue("$path", missing); command.ExecuteNonQuery();
+        }
+        t.Write("profile/.codex/sessions/later.jsonl", "{\"type\":\"message\"}\n{\"type\":\"session_meta\",\"payload\":{\"id\":\"later\"}}\n");
+
+        var result = await new DiscoveryService().ScanAsync(profile);
+
+        Assert.False(Assert.Single(result.Items, x => x.Kind == SourceKind.Session && x.Path == missing).IsDirectory);
+        Assert.Contains(result.Findings, x => x.Code == "session-metadata-unsupported" && x.Level == FindingLevel.Blocker);
+        Assert.Contains(result.Sessions, x => x.Id == "later");
+    }
+
+    [Fact]
+    public async Task ExplicitReferenceToMissingDefaultRemainsRequiredWithCustomCore()
+    {
+        using var t = new TestTree(); var profile = t.Dir("profile"); var core = t.Dir("custom");
+        var missingDefault = Path.Combine(profile, ".codex");
+        t.Write("custom/config.toml", "codex_home = '" + missingDefault + "'");
+
+        var result = await new DiscoveryService().ScanAsync(profile, additionalRoots: [core]);
+
+        Assert.Contains(result.Items, x => x.Kind == SourceKind.Core && x.Path == missingDefault && x.Required && !x.Exists);
+        Assert.Contains(result.Findings, x => x.Code == "required-codex-root-missing" && x.Path == missingDefault);
     }
 
     private static string Json(string value) => value.Replace("\\", "\\\\");

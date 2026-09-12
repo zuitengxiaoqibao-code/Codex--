@@ -16,6 +16,7 @@ public sealed class RestoreEngine
         var findings = new List<Finding>();
         var items = new List<RestorePreviewItem>();
         var rootMap = package.Manifest.Roots.ToDictionary(r => r.Id);
+        try {RestorePlanner.ValidateCoverage(package,request);} catch(BackupException ex) {findings.Add(new(FindingLevel.Blocker,"COMPLETE_COVERAGE",ex.Message));}
         if (request.Mappings.Count == 0 || request.Mappings.Count > rootMap.Count || request.Mappings.Select(m => m.RootId).Distinct().Count() != request.Mappings.Count)
             findings.Add(new(FindingLevel.Blocker, "MAPPINGS", "至少选择一个根目录；同一根目录不能映射两次。"));
         foreach (var mapping in request.Mappings)
@@ -91,11 +92,12 @@ public sealed class RestoreEngine
             ct.ThrowIfCancellationRequested();
             if (e.IsDirectory) Directory.CreateDirectory(e.Stage);
             await MaterializeAsync(package.PackagePath, e.Stage, e.RestoredFiles, p => { bytes += p; count++; progress?.Report(new("准备恢复", $"已校验 {count:N0} 个文件", count, bytes, preview.TotalBytes)); }, ct);
-            if (e.ManagedCore)
+            if (e.ManagedCore || request.RequireCompleteMigration)
             {
-                var pathMappings = request.Mappings.ToDictionary(m => PathSafety.Full(rootMap[m.RootId].OriginalPath), m => PathSafety.Full(m.TargetPath), StringComparer.OrdinalIgnoreCase);
-                using (DirectoryLease.Acquire(e.Stage))
+                var pathMappings = RestorePlanner.BuildPathMappings(package.Manifest,request.Mappings);
+                if(e.ManagedCore) using (DirectoryLease.Acquire(e.Stage))
                     adaptationNotes.AddRange(await new CoreRestoreAdapter().PrepareAsync(e.Stage, rootMap[e.RootId].OriginalPath, pathMappings, ct));
+                await RestorePlanner.PrepareStructuralFilesAsync(e.Stage,rootMap[e.RootId],e.RestoredFiles,package,pathMappings,ct);
                 var stagedRoot = new BackupRoot { Id = e.RootId, OriginalPath = e.Stage, IsDirectory = e.IsDirectory, Kind = SourceKind.Custom };
                 e.RestoredFiles = BackupEngine.Snapshot([stagedRoot], null, ct);
                 foreach (var file in e.RestoredFiles.Where(f => !f.IsDirectory)) file.Sha256 = await FileIO.HashAsync(BackupEngine.SourcePath(stagedRoot, file), ct);
@@ -132,6 +134,7 @@ public sealed class RestoreEngine
         }
         ct.ThrowIfCancellationRequested();
         // Re-check all originals before the first switch. Any new file prevents replacement.
+        RestorePlanner.ValidateCoverage(package,request,journal.Entries.ToDictionary(e=>e.RootId,e=>e.Stage));
         foreach (var e in journal.Entries)
         {
             PathSafety.RejectReparseAncestors(e.Target);
@@ -153,9 +156,11 @@ public sealed class RestoreEngine
             e.State = "Applied"; SaveJournal(journalPath, journal);
             await MatchTreeAsync(e.Target, e.RestoredFiles, ct);
         }
+        RestorePlanner.ValidateCoverage(package,request,journal.Entries.ToDictionary(e=>e.RootId,e=>e.Target),adaptationNotes);
         journal.Status = "Complete"; SaveJournal(journalPath, journal);
         var notes = preview.Findings.Select(f => f.Message).ToList();
         notes.AddRange(adaptationNotes);
+        if(request.RequireCompleteMigration)notes.Add("完整迁移的会话正文与源码目录关联已在暂存及最终位置检查；项目运行环境和 Codex 界面仍需实际打开验收。");
         notes.Add("文件层恢复校验通过；Codex 会话显示、登录、记忆读取和项目运行仍需人工验收。");
         return new(journalPath, journal.Entries.Select(e => e.Target).ToList(), journal.Entries.Where(e => e.HadOriginal).Select(e => e.Rollback).ToList(), notes);
         }

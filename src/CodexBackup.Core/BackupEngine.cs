@@ -9,6 +9,8 @@ public sealed class BackupEngine
     {
         var ct = cancellationToken;
         ct.ThrowIfCancellationRequested();
+        var gaps = MigrationCoverage.Evaluate(request);
+        if (gaps.Count > 0) throw new BackupException("还不能制作完整迁移包：\n" + string.Join("\n", gaps.Take(12).Select(f => f.Message + " " + f.Path)) + (gaps.Count > 12 ? $"\n另有 {gaps.Count - 12} 项，请查看完整性检查列表。" : ""));
         var selected = ValidateSelection(request.Sources);
         WriterGuard.RequireStoppedForSources(selected);
         var target = PathSafety.Full(request.DestinationDirectory);
@@ -21,12 +23,15 @@ public sealed class BackupEngine
             if (Environment.ProcessPath is { } exe && PathSafety.Contains(s.Path, exe))
                 throw new BackupException("本工具正在所选来源目录内运行，请把 EXE 移到独立目录后重试。");
         }
-        var manifest = new BackupManifest { Roots = NormalizeRoots(selected), CoverageNotes = request.CoverageNotes.ToList(),
+        var manifest = new BackupManifest { Roots = NormalizeRoots(selected), CoverageNotes = request.CoverageNotes.ToList(), ToolVersion = "0.2.0-preview",
+            CompleteMigration = request.CompleteMigration, Sessions = request.Sessions.ToList(), LogicalSources = request.Sources.ToList(), PathReplacements = new(request.PathReplacements, StringComparer.OrdinalIgnoreCase),
             Exclusions = request.Sources.Where(s => !s.Selected).Select(s => $"未作为独立项目选择（父目录可能包含）：{s.Name} | {s.Path}").ToList() };
         manifest.CoverageNotes.Add("范围仅限所选来源及已发现依赖；未挂载磁盘、外部服务、系统凭据和未知位置未由此备份保证覆盖。");
         manifest.CoverageNotes.Add("未使用密码加密；备份包含敏感原始配置。硬链接按独立内容副本保存，不保留共享 inode 关系。");
         progress?.Report(new("预检", "枚举文件并检查类型、权限与目标空间"));
         var files = Snapshot(manifest.Roots, manifest.Exclusions, ct);
+        MigrationCoverage.ValidateInventory(manifest, files);
+        manifest.CoverageNotes.Insert(0, manifest.CompleteMigration ? "已核对本次发现的会话、对应源码及必需文件均在清单中；运行环境及应用可用性需恢复后检查。" : "这是自选/抢救备份，不是完整迁移包。未选择、缺失或未发现的项目源码可能无法恢复。");
         manifest.TotalBytes = files.Sum(f => f.Length);
         manifest.FileCount = files.Count(f => !f.IsDirectory);
         var free = new DriveInfo(Path.GetPathRoot(target)!).AvailableFreeSpace;

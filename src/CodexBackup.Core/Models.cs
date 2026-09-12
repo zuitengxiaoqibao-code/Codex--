@@ -1,6 +1,6 @@
 namespace CodexBackup.Core;
 
-public enum SourceKind { Core, Project, Memory, Skill, Plugin, Tool, Application, Environment, Custom }
+public enum SourceKind { Core, Project, Memory, Skill, Plugin, Tool, Application, Environment, Custom, Session }
 public enum FindingLevel { Info, Warning, Blocker }
 public sealed record Finding(FindingLevel Level, string Code, string Message, string? Path = null);
 
@@ -32,6 +32,17 @@ public sealed class ScanResult
     public List<Finding> Findings { get; set; } = [];
     public List<string> InstallationPaths { get; set; } = [];
     public string CodexVersion { get; set; } = "未知";
+    public List<SessionReference> Sessions { get; set; } = [];
+}
+
+public sealed class SessionReference
+{
+    public string Id { get; set; } = "";
+    public string Title { get; set; } = "";
+    public string CorePath { get; set; } = "";
+    public string ProjectPath { get; set; } = "";
+    public string TranscriptPath { get; set; } = "";
+    public DateTimeOffset? LastActivityUtc { get; set; }
 }
 
 public sealed record OperationProgress(string Phase, string Message, long Files = 0, long Bytes = 0, long? TotalBytes = null);
@@ -40,6 +51,10 @@ public sealed class BackupRequest
     public List<SourceItem> Sources { get; set; } = [];
     public string DestinationDirectory { get; set; } = "";
     public List<string> CoverageNotes { get; set; } = [];
+    public bool CompleteMigration { get; set; }
+    public List<SessionReference> Sessions { get; set; } = [];
+    public List<Finding> DiscoveryFindings { get; set; } = [];
+    public Dictionary<string,string> PathReplacements { get; set; } = new(StringComparer.OrdinalIgnoreCase);
 }
 public sealed record BackupResult(string PackagePath, BackupManifest Manifest);
 
@@ -57,6 +72,10 @@ public sealed class BackupManifest
     public List<string> CoverageNotes { get; set; } = [];
     public long FileCount { get; set; }
     public long TotalBytes { get; set; }
+    public bool CompleteMigration { get; set; }
+    public List<SessionReference> Sessions { get; set; } = [];
+    public Dictionary<string,string> PathReplacements { get; set; } = new(StringComparer.OrdinalIgnoreCase);
+    public List<SourceItem> LogicalSources { get; set; } = [];
 }
 public sealed class BackupRoot
 {
@@ -90,6 +109,7 @@ public sealed class RestoreRequest
     public List<RestoreMapping> Mappings { get; set; } = [];
     public bool ReplaceExisting { get; set; }
     public bool Isolated { get; set; } = true;
+    public bool RequireCompleteMigration { get; set; }
 }
 public sealed record RestorePreview(IReadOnlyList<RestorePreviewItem> Items, IReadOnlyList<Finding> Findings, long TotalBytes)
 {

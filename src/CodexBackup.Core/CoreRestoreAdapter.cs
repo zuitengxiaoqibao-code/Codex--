@@ -25,15 +25,17 @@ public sealed class CoreRestoreAdapter
         var notes = new List<string>();
         static string Normalize(string value)
         {
+            if(value.StartsWith("\\\\?\\",StringComparison.Ordinal) && value.Length>6 && char.IsAsciiLetter(value[4]) && value[5]==':')value=value[4..];
             if(!Path.IsPathFullyQualified(value) || value.StartsWith("\\\\",StringComparison.Ordinal) || value.StartsWith("//",StringComparison.Ordinal)) throw new BackupException("Core 路径映射必须是完整本地路径。");
             return Path.GetFullPath(value).TrimEnd('\\','/');
         }
         var mappings = pathMappings.Select(p=>new KeyValuePair<string,string>(Normalize(p.Key),Normalize(p.Value))).OrderByDescending(p=>p.Key.Length).ToArray();
-        if(mappings.Select(p=>p.Value).Distinct(StringComparer.OrdinalIgnoreCase).Count()!=mappings.Length || mappings.Select(p=>p.Key).Distinct(StringComparer.OrdinalIgnoreCase).Count()!=mappings.Length) throw new BackupException("Core 路径映射含重复的规范化源或目标。");
+        if(mappings.Select(p=>p.Key).Distinct(StringComparer.OrdinalIgnoreCase).Count()!=mappings.Length) throw new BackupException("Core 路径映射含重复的规范化源。");
         var pathNoteCount=0;
         void PathNote(string value) { if(pathNoteCount++<500) notes.Add(value); else if(pathNoteCount==501) notes.Add("路径说明超过 500 条，后续说明已省略；映射规则仍应用于所有受支持记录。"); }
         string Map(string value)
         {
+            if(value.StartsWith("\\\\?\\",StringComparison.Ordinal) && value.Length>6 && char.IsAsciiLetter(value[4]) && value[5]==':')value=value[4..];
             var comparable=value.Replace('/','\\');
             foreach(var pair in mappings)
             {
@@ -53,7 +55,7 @@ public sealed class CoreRestoreAdapter
         if(File.Exists(state)) await AdaptDatabase(state,Map,notes,ct);
         // Only these passive top-level resources remain active. Unknown resources are kept disabled.
         var passive = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
-        { "state_5.sqlite","state_5.sqlite-wal","state_5.sqlite-shm","thread_history_1.sqlite","thread_history_1.sqlite-wal","thread_history_1.sqlite-shm","sessions","archived_sessions","session_index.jsonl","history.jsonl",".codex-global-state.json","memories" };
+        { "state_5.sqlite","state_5.sqlite-wal","state_5.sqlite-shm","thread_history_1.sqlite","thread_history_1.sqlite-wal","thread_history_1.sqlite-shm","sessions","archived_sessions","session_index.jsonl","history.jsonl",".codex-global-state.json","memories","worktrees" };
         foreach(var entry in Directory.EnumerateFileSystemEntries(stagingRoot).ToArray())
         {
             ct.ThrowIfCancellationRequested(); PathSafety.RejectReparseAncestors(entry);
@@ -82,7 +84,52 @@ public sealed class CoreRestoreAdapter
                 }
                 clean["local-projects"]=kept;
             }
+            else if(node["local-projects"] is JsonObject projectMap)
+            {
+                var kept=new JsonObject();
+                foreach(var pair in projectMap)
+                {
+                    if(pair.Value is not JsonObject project || !Strings(project["rootPaths"]))throw new BackupException("local-projects 项目关联结构不受支持。");
+                    var entry=new JsonObject{["rootPaths"]=new JsonArray(((JsonArray)project["rootPaths"]!).Select(x=>(JsonNode?)JsonValue.Create(Map(x!.GetValue<string>()))).ToArray())};
+                    foreach(var field in new[]{"id","name"})if(project[field] is JsonValue v && v.TryGetValue<string>(out _))entry[field]=v.DeepClone();
+                    kept[pair.Key]=entry;
+                }
+                clean["local-projects"]=kept;
+            }
             else if(node.ContainsKey("local-projects")) throw new BackupException("local-projects 结构不受支持。");
+            if(node["thread-projectless-output-directories"] is JsonObject outputs)
+            {
+                var kept=new JsonObject();foreach(var pair in outputs){if(pair.Value is not JsonValue v || !v.TryGetValue<string>(out var p))throw new BackupException("无项目会话输出目录结构不受支持。");kept[pair.Key]=Map(p);}clean["thread-projectless-output-directories"]=kept;
+            }
+            if(node["electron-persisted-atom-state"] is JsonObject atoms)
+            {
+                var kept=new JsonObject();
+                foreach(var pair in atoms.Where(p=>p.Key.StartsWith("thread-workspace-state-v1:",StringComparison.Ordinal)))
+                {
+                    if(pair.Value is not JsonObject workspaceState)throw new BackupException("会话工作区状态结构不受支持。");
+                    var updated=new JsonObject();
+                    foreach(var phase in new[]{"applied","pending"})
+                    {
+                        if(workspaceState[phase] is not JsonObject workspace)throw new BackupException("会话工作区阶段结构不受支持。");
+                        var copy=new JsonObject();
+                        if(workspace["cwd"] is JsonValue cwd && cwd.TryGetValue<string>(out var path))copy["cwd"]=Map(path);
+                        else throw new BackupException("会话工作区 cwd 结构不受支持。");
+                        foreach(var field in new[]{"projectSources","runtimeWorkspaceRoots"})
+                        {
+                            if(!Strings(workspace[field]))throw new BackupException("会话工作区路径列表结构不受支持。");
+                            copy[field]=new JsonArray(((JsonArray)workspace[field]!).Select(x=>(JsonNode?)JsonValue.Create(Map(x!.GetValue<string>()))).ToArray());
+                        }
+                        updated[phase]=copy;
+                    }
+                    if(workspaceState["project"] is JsonObject project)
+                    {
+                        var copy=new JsonObject();foreach(var field in new[]{"projectId","projectKind"})if(project[field] is JsonValue v && v.TryGetValue<string>(out _))copy[field]=v.DeepClone();updated["project"]=copy;
+                    }
+                    if(workspaceState["revision"] is JsonValue revision && revision.TryGetValue<string>(out _))updated["revision"]=revision.DeepClone();
+                    kept[pair.Key]=updated;
+                }
+                clean["electron-persisted-atom-state"]=kept;
+            }
             if(node.ContainsKey("project-order")) {if(!Strings(node["project-order"]))throw new BackupException("project-order 结构不受支持。");clean["project-order"]=node["project-order"]!.DeepClone();}
             if(node["thread-workspace-root"] is JsonObject associations)
             {

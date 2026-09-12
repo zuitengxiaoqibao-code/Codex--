@@ -69,6 +69,7 @@ public sealed class PackageVerifier
                 throw new BackupException("条目的父目录缺失或被文件占用。");
         }
         if (count != manifest.FileCount || bytes != manifest.TotalBytes) throw new BackupException("备份统计与清单不一致。");
+        MigrationCoverage.ValidateInventory(manifest, records);
     }
 
     private static bool IsId(string id) => id is not null && Regex.IsMatch(id, "^[0-9a-f]{32}$", RegexOptions.CultureInvariant);

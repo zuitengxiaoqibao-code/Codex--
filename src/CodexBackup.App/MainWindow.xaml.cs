@@ -25,6 +25,9 @@ public partial class MainWindow : Window
     private RestorePreview? restorePreview;
     private string? previewFingerprint;
     private string? resultPath;
+    private readonly List<string> additionalRoots = [];
+    private readonly Dictionary<string,string> pathReplacements = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string,bool> baseRequired = [];
 
     public MainWindow()
     {
@@ -83,12 +86,12 @@ public partial class MainWindow : Window
         if (!Directory.Exists(profile)) { MessageBox.Show(this, "用户配置目录不存在或不可访问。", "无法扫描", MessageBoxButton.OK, MessageBoxImage.Warning); return; }
         await RunBusyAsync("正在扫描 Codex 数据位置…", async (progress, ct) =>
         {
-            scan = await Task.Run(() => discovery.ScanAsync(profile, progress, ct), ct);
+            scan = await Task.Run(() => discovery.ScanAsync(profile, progress, ct, additionalRoots.ToArray()), ct);
             sources.Clear(); foreach (var item in scan.Items) sources.Add(item);
-            BackupFindingsList.Items.Clear();
-            BackupFindingsList.Items.Add($"用户：{scan.UserName} · 计算机：{scan.MachineName} · Codex 版本：{scan.CodexVersion}");
-            BackupFindingsList.Items.Add($"发现 {scan.Items.Count} 个来源；安装位置 {scan.InstallationPaths.Count} 个。未列出的范围不视为已覆盖。");
-            foreach (var finding in scan.Findings) BackupFindingsList.Items.Add(FormatFinding(finding));
+            baseRequired.Clear(); foreach (var item in sources) baseRequired[item.Id] = item.Required;
+            foreach (var replacement in pathReplacements.Values.Distinct(StringComparer.OrdinalIgnoreCase)) if (Directory.Exists(replacement) || File.Exists(replacement)) AddManual(replacement, Directory.Exists(replacement));
+            SessionsGrid.ItemsSource = scan.Sessions;
+            ApplyBackupMode(); RefreshCoverage();
         });
     }
 
@@ -111,10 +114,80 @@ public partial class MainWindow : Window
         sources.Add(new SourceItem { Name = Path.GetFileName(full), Path = full, Kind = SourceKind.Custom, Selected = true, Exists = true, IsDirectory = directory, Reason = "用户手动加入", DiscoveredBy = "手动选择", LastModifiedUtc = directory ? Directory.GetLastWriteTimeUtc(full) : File.GetLastWriteTimeUtc(full) });
     }
 
+    private void AddScanLocation_Click(object sender, RoutedEventArgs e)
+    {
+        var path = PickFolder("选择实际数据目录，或包含它的上级目录（可以是 D、E 等任意本地盘）");
+        if (path is null) return;
+        if (!additionalRoots.Contains(path, StringComparer.OrdinalIgnoreCase)) additionalRoots.Add(path);
+        AdditionalRootsText.Text = "额外扫描位置：" + string.Join("；", additionalRoots);
+        Scan_Click(sender, e);
+    }
+    private void ClearScanLocations_Click(object sender, RoutedEventArgs e)
+    {
+        additionalRoots.Clear(); AdditionalRootsText.Text = "已清除额外位置；自动配置扫描仍覆盖各个本地盘符。"; Scan_Click(sender, e);
+    }
+    private void BackupModeChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (SourcesGrid is null) return;
+        ApplyBackupMode(); RefreshCoverage();
+    }
+    private void ApplyBackupMode()
+    {
+        var complete = BackupModeBox.SelectedIndex == 0;
+        foreach (var item in sources)
+        {
+            var relocated = pathReplacements.ContainsKey(item.Path);
+            item.Required = !relocated && (baseRequired.GetValueOrDefault(item.Id) || complete && item.Exists);
+            if (relocated) item.Selected = false;
+            else if (item.Required) item.Selected = true;
+            item.Reason = relocated ? "原位置已搬走，将从指定的新位置保存，并在恢复时重连路径" : item.Required ? "完整迁移需要此项，避免会话、源码或依赖漏掉" : !item.Exists ? "原文件未找到，请定位新位置；缺失不能算完整" : "自选内容；取消后只保存剩余文件";
+        }
+        SourcesGrid.Items.Refresh();
+    }
+    private BackupRequest CurrentBackupRequest() => new()
+    {
+        Sources = sources.ToList(), DestinationDirectory = BackupDestinationBox.Text.Trim(), CompleteMigration = BackupModeBox.SelectedIndex == 0,
+        Sessions = scan?.Sessions.ToList() ?? [], DiscoveryFindings = scan?.Findings.ToList() ?? [],
+        CoverageNotes = scan?.Findings.Select(UserGuidance.Explain).ToList() ?? [], PathReplacements = new(pathReplacements, StringComparer.OrdinalIgnoreCase)
+    };
+    private void RefreshCoverage()
+    {
+        if (scan is null || CoverageSummaryText is null) return;
+        var gaps = MigrationCoverage.Evaluate(CurrentBackupRequest());
+        var drives = sources.Where(s => s.Exists).Select(s => Path.GetPathRoot(s.Path)).Distinct(StringComparer.OrdinalIgnoreCase);
+        CoverageSummaryText.Text = $"已发现 {scan.Sessions.Count} 个会话关联、{sources.Count(s => s.Kind == SourceKind.Project)} 个项目位置。涉及磁盘：{string.Join("、", drives)}。\n" +
+            (BackupModeBox.SelectedIndex != 0 ? "当前是自选 / 抢救模式，结果不会标记为完整迁移。" : gaps.Count == 0 ? "本次扫描的会话与项目已选齐。备份时还会按真实文件清单再次核对。" : $"还有 {gaps.Count} 项需要处理，暂不能制作完整迁移包。");
+        BackupFindingsList.Items.Clear();
+        foreach (var finding in gaps.Concat(scan.Findings.Where(f => f.Code != "known-location-missing" && (!f.Code.Contains("missing") || BackupModeBox.SelectedIndex != 0))).DistinctBy(f => (f.Code, f.Path)).Take(150))
+            BackupFindingsList.Items.Add(UserGuidance.Explain(finding));
+        if (gaps.Count > 150) BackupFindingsList.Items.Add("问题较多，更多位置可在来源列表与技术详细记录中查找；没有省略备份前的完整检查。");
+        TechnicalDetailsBox.Text = string.Join(Environment.NewLine, scan.Findings.Concat(gaps).Select(f => $"{f.Code}: {f.Message} {f.Path}"));
+    }
+    private void CheckCoverage_Click(object sender, RoutedEventArgs e)
+    {
+        SourcesGrid.CommitEdit(DataGridEditingUnit.Cell, true); SourcesGrid.CommitEdit(DataGridEditingUnit.Row, true); RefreshCoverage();
+    }
+    private void LocateMissing_Click(object sender, RoutedEventArgs e)
+    {
+        if (SourcesGrid.SelectedItem is not SourceItem item) { MessageBox.Show(this, "请先在来源列表中点选原来的项目或会话位置。", "定位原文件"); return; }
+        string? path;
+        if (item.IsDirectory) path = PickFolder("选择这个项目或数据目录现在的位置");
+        else { var dialog = new OpenFileDialog { Title = "选择原会话文件现在的位置", CheckFileExists = true }; path = dialog.ShowDialog() == true ? dialog.FileName : null; }
+        if (path is null) return;
+        if (path.Equals(item.Path, StringComparison.OrdinalIgnoreCase)) { MessageBox.Show(this, "新旧位置相同。请重新扫描确认文件是否可读取。"); return; }
+        pathReplacements[item.Path] = path; AddManual(path, Directory.Exists(path));
+        var located = sources.First(s => s.Path.Equals(path, StringComparison.OrdinalIgnoreCase)); located.Kind = item.Kind;
+        if (Directory.Exists(path) && !additionalRoots.Contains(path, StringComparer.OrdinalIgnoreCase)) { additionalRoots.Add(path); AdditionalRootsText.Text = "额外扫描位置：" + string.Join("；", additionalRoots); Scan_Click(sender, e); }
+        else { ApplyBackupMode(); RefreshCoverage(); }
+    }
+
     private async void StartBackup_Click(object sender, RoutedEventArgs e)
     {
         SourcesGrid.CommitEdit(DataGridEditingUnit.Cell, true); SourcesGrid.CommitEdit(DataGridEditingUnit.Row, true);
         if (scan is null) { MessageBox.Show(this, "请先完成扫描。", "缺少扫描结果"); return; }
+        RefreshCoverage();
+        var request = CurrentBackupRequest();
+        if (MigrationCoverage.Evaluate(request).Count > 0) { MessageBox.Show(this, "会话与源码还没有核对齐全。请先处理列表里的缺失位置或扫描问题；完整迁移不会跳过这些内容。", "暂不能完整备份", MessageBoxButton.OK, MessageBoxImage.Warning); return; }
         if (BackupReviewCheck.IsChecked != true) { MessageBox.Show(this, "请确认备份包的保存位置与未加密风险。", "需要确认"); return; }
         var destination = BackupDestinationBox.Text.Trim();
         if (string.IsNullOrWhiteSpace(destination)) { MessageBox.Show(this, "请选择备份保存目录。", "缺少目标"); return; }
@@ -122,9 +195,8 @@ public partial class MainWindow : Window
         if (MessageBox.Show(this, $"将备份 {sources.Count(s => s.Selected)} 项，另有 {sources.Count(s => !s.Selected)} 项未独立选择。\n\n目标：{destination}\n\n精确空间、文件类型和运行程序将在写入前再次检查。备份包含原始配置，可能含凭据。确认开始？", "最终备份确认", MessageBoxButton.OKCancel, MessageBoxImage.Warning) != MessageBoxResult.OK) return;
         await RunBusyAsync("正在创建并逐文件校验备份…", async (progress, ct) =>
         {
-            var request = new BackupRequest { Sources = sources.ToList(), DestinationDirectory = destination, CoverageNotes = scan.Findings.Select(FormatFinding).ToList() };
             var result = await Task.Run(() => backupEngine.BackupAsync(request, progress, ct), ct);
-            ShowResult("备份包已创建并通过文件校验", $"文件：{result.Manifest.FileCount:N0}，大小：{FormatBytes(result.Manifest.TotalBytes)}。请保留报告中的覆盖限制，并在新系统完成 Codex 人工验收。", result.PackagePath, result.Manifest.CoverageNotes);
+            ShowResult(result.Manifest.CompleteMigration ? "会话与项目迁移包已创建" : "自选 / 抢救备份已创建（不是完整迁移）", $"文件：{result.Manifest.FileCount:N0}，大小：{FormatBytes(result.Manifest.TotalBytes)}，会话关联：{result.Manifest.Sessions.Count}。文件与关联检查不代替新系统上登录和项目运行验收。", result.PackagePath, result.Manifest.CoverageNotes);
         });
     }
 
@@ -142,6 +214,9 @@ public partial class MainWindow : Window
             restorePreview = null; previewFingerprint = null; RestorePreviewList.Items.Clear();
             RestorePreviewList.Items.Add($"备份包完整性通过：{verifiedPackage.Manifest.FileCount:N0} 个文件，{FormatBytes(verifiedPackage.Manifest.TotalBytes)}。");
             RestorePreviewList.Items.Add("尚未执行恢复预演；文件校验不代表应用层验收通过。");
+            RestoreCoverageText.Text = verifiedPackage.Manifest.CompleteMigration ? $"这是完整迁移包，含 {verifiedPackage.Manifest.Sessions.Count} 个会话关联。请选择原布局或新的文件夹，同时恢复会话和源码。" : "这是旧版或自选 / 抢救包，缺少完整关联证明。可以解出文件，但不能保证会话对应源码齐全；建议回原电脑用新版重新备份。";
+            RequireCompleteCheck.IsChecked = verifiedPackage.Manifest.CompleteMigration;
+            IsolatedCheck.IsChecked = true;
         });
     }
 
@@ -192,8 +267,34 @@ public partial class MainWindow : Window
         PackagePath = RestorePackageBox.Text,
         Isolated = IsolatedCheck.IsChecked == true,
         ReplaceExisting = ReplaceExistingCheck.IsChecked == true,
+        RequireCompleteMigration = RequireCompleteCheck.IsChecked == true,
         Mappings = mappings.Where(x => x.Selected).Select(x => new RestoreMapping { RootId = x.RootId, TargetPath = x.TargetPath.Trim() }).ToList()
     };
+
+    private void SetPlannedLayout(string? newBase, bool original)
+    {
+        if (verifiedPackage is null) { MessageBox.Show(this, "请先选择备份包。"); return; }
+        try
+        {
+            var planned = RestorePlanner.CreateMappings(verifiedPackage.Manifest, newBase, RuntimeCodexHome(), original);
+            mappings.Clear();
+            foreach (var mapping in planned) { var root = verifiedPackage.Manifest.Roots.Single(r => r.Id == mapping.RootId); mappings.Add(new MappingRow(root.Id, root.OriginalPath, mapping.TargetPath, root.Kind)); }
+            IsolatedCheck.IsChecked = false;
+            RequireCompleteCheck.IsChecked = true;
+            ClearRestorePreview("已一起设置会话、源码和记忆的位置。请检查路径；文件已存在时需要明确启用替换，随后重新预演。");
+            if (verifiedPackage.Manifest.Roots.Count(r => r.Kind == SourceKind.Core) > 1) RestorePreviewList.Items.Add("备份中有多套 Codex 数据。第一套映射到当前程序目录，其他套保存在独立数据目录；不会合并会话数据库。需要使用其他套时，请在该数据目录下单独配置 CODEX_HOME。请核对表格中哪一套是你的主数据。");
+        }
+        catch (Exception ex) { MessageBox.Show(this, UserGuidance.Error(ex), "无法设置恢复位置"); }
+    }
+    private void OriginalLayout_Click(object sender, RoutedEventArgs e) => SetPlannedLayout(null, true);
+    private void NewLayout_Click(object sender, RoutedEventArgs e) { var folder = PickFolder("选择新系统保存项目和数据的总目录"); if (folder is not null) SetPlannedLayout(folder, false); }
+    private void IsolatedLayout_Click(object sender, RoutedEventArgs e)
+    {
+        if (verifiedPackage is null) { MessageBox.Show(this, "请先选择备份包。"); return; }
+        var isolatedBase = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), "Codex-Restored", verifiedPackage.Manifest.BackupId);
+        mappings.Clear(); foreach (var root in verifiedPackage.Manifest.Roots) mappings.Add(new MappingRow(root.Id, root.OriginalPath, Path.Combine(isolatedBase, SafeName(root.Name, root.Id) + "-" + root.Id[..8]), root.Kind));
+        IsolatedCheck.IsChecked = true; RequireCompleteCheck.IsChecked = false; ClearRestorePreview("此操作只解出文件供核对，不接入 Codex，不作为可直接使用的迁移结果。");
+    }
 
     private async void PreviewRestore_Click(object sender, RoutedEventArgs e)
     {
@@ -248,6 +349,7 @@ public partial class MainWindow : Window
             var package = await Task.Run(() => verifier.VerifyAsync(path, progress, ct), ct);
             CheckResultsList.Items.Clear();
             CheckResultsList.Items.Add($"文件完整性校验通过：{package.Manifest.FileCount:N0} 个文件，{FormatBytes(package.Manifest.TotalBytes)}。");
+            CheckResultsList.Items.Add(package.Manifest.CompleteMigration ? $"清单包含 {package.Manifest.Sessions.Count} 个会话与项目关联，已核对对应文件存在。" : "该包不是经新版核对的完整迁移包，不能证明源码与会话齐全。");
             CheckResultsList.Items.Add("Codex 应用层验收仍待在目标系统手动完成。");
         });
     }
@@ -326,15 +428,9 @@ public partial class MainWindow : Window
         return string.IsNullOrWhiteSpace(value) ? fallback : value;
     }
 
-    private static string FormatFinding(Finding f) => $"[{(f.Level == FindingLevel.Blocker ? "阻断" : f.Level == FindingLevel.Warning ? "警告" : "信息")}] {f.Message}{(string.IsNullOrWhiteSpace(f.Path) ? "" : " · " + f.Path)}";
+    private static string FormatFinding(Finding f) => UserGuidance.Explain(f);
     private static string FormatBytes(long bytes) => bytes >= 1L << 30 ? $"{bytes / (double)(1L << 30):N2} GiB" : bytes >= 1L << 20 ? $"{bytes / (double)(1L << 20):N2} MiB" : $"{bytes / 1024d:N1} KiB";
-    private static string UserMessage(Exception ex) => ex switch
-    {
-        BackupException => ex.Message,
-        UnauthorizedAccessException => "没有访问所选路径的权限。请检查权限并重试。",
-        IOException => "文件系统操作失败，可能存在占用、空间不足或设备断开。",
-        _ => $"{ex.GetType().Name}：{ex.Message}"
-    };
+    private static string UserMessage(Exception ex) => UserGuidance.Error(ex);
 }
 
 public sealed class MappingRow
@@ -359,7 +455,7 @@ public sealed class SourceKindChineseConverter : IValueConverter
     {
         SourceKind.Core => "核心", SourceKind.Project => "项目", SourceKind.Memory => "记忆",
         SourceKind.Skill => "技能", SourceKind.Plugin => "插件", SourceKind.Tool => "工具",
-        SourceKind.Application => "应用", SourceKind.Environment => "环境", SourceKind.Custom => "自定义",
+        SourceKind.Application => "应用", SourceKind.Environment => "环境", SourceKind.Custom => "自定义", SourceKind.Session => "会话文件",
         _ => "未知"
     };
 }
