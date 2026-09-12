@@ -3,6 +3,10 @@ namespace CodexBackup.Core;
 public enum SourceKind { Core, Project, Memory, Skill, Plugin, Tool, Application, Environment, Custom, Session }
 public enum FindingLevel { Info, Warning, Blocker }
 public sealed record Finding(FindingLevel Level, string Code, string Message, string? Path = null);
+public static class ProductInfo
+{
+    public const string Version = "0.3.0-preview";
+}
 
 public sealed class SourceItem
 {
@@ -33,6 +37,10 @@ public sealed class ScanResult
     public List<string> InstallationPaths { get; set; } = [];
     public string CodexVersion { get; set; } = "未知";
     public List<SessionReference> Sessions { get; set; } = [];
+    public EnvironmentManifest EnvironmentManifest { get; set; } = new();
+    public int UniqueSessionCount => Sessions.Select(s => s.Id).Where(id => !string.IsNullOrWhiteSpace(id)).Distinct(StringComparer.OrdinalIgnoreCase).Count();
+    public int SessionAssociationCount => Sessions.Count;
+    public int ProjectLocationCount => Items.Where(x => x.Kind == SourceKind.Project).Select(x => x.Path).Distinct(StringComparer.OrdinalIgnoreCase).Count();
 }
 
 public sealed class SessionReference
@@ -55,13 +63,16 @@ public sealed class BackupRequest
     public List<SessionReference> Sessions { get; set; } = [];
     public List<Finding> DiscoveryFindings { get; set; } = [];
     public Dictionary<string,string> PathReplacements { get; set; } = new(StringComparer.OrdinalIgnoreCase);
+    public string SourceCodexVersion { get; set; } = "未知";
+    public EnvironmentManifest EnvironmentManifest { get; set; } = new();
+    public PreflightReport? Preflight { get; set; }
 }
 public sealed record BackupResult(string PackagePath, BackupManifest Manifest);
 
 public sealed class BackupManifest
 {
     public int FormatVersion { get; set; } = 1;
-    public string ToolVersion { get; set; } = "0.1.0-preview";
+    public string ToolVersion { get; set; } = ProductInfo.Version;
     public string BackupId { get; set; } = Guid.NewGuid().ToString("N");
     public DateTimeOffset CreatedUtc { get; set; } = DateTimeOffset.UtcNow;
     public string SourceProfile { get; set; } = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
@@ -76,6 +87,9 @@ public sealed class BackupManifest
     public List<SessionReference> Sessions { get; set; } = [];
     public Dictionary<string,string> PathReplacements { get; set; } = new(StringComparer.OrdinalIgnoreCase);
     public List<SourceItem> LogicalSources { get; set; } = [];
+    public string SourceCodexVersion { get; set; } = "未知";
+    public EnvironmentManifest EnvironmentManifest { get; set; } = new();
+    public PreflightReport? Preflight { get; set; }
 }
 public sealed class BackupRoot
 {

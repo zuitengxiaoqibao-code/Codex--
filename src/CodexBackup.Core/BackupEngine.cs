@@ -23,9 +23,11 @@ public sealed class BackupEngine
             if (Environment.ProcessPath is { } exe && PathSafety.Contains(s.Path, exe))
                 throw new BackupException("本工具正在所选来源目录内运行，请把 EXE 移到独立目录后重试。");
         }
-        var manifest = new BackupManifest { Roots = NormalizeRoots(selected), CoverageNotes = request.CoverageNotes.ToList(), ToolVersion = "0.2.0-preview",
+        var manifest = new BackupManifest { Roots = NormalizeRoots(selected), CoverageNotes = request.CoverageNotes.ToList(), ToolVersion = ProductInfo.Version,
             CompleteMigration = request.CompleteMigration, Sessions = request.Sessions.ToList(), LogicalSources = request.Sources.ToList(), PathReplacements = new(request.PathReplacements, StringComparer.OrdinalIgnoreCase),
-            Exclusions = request.Sources.Where(s => !s.Selected).Select(s => $"未作为独立项目选择（父目录可能包含）：{s.Name} | {s.Path}").ToList() };
+            Exclusions = request.Sources.Where(s => !s.Selected).Select(s => $"未作为独立项目选择（父目录可能包含）：{s.Name} | {s.Path}").ToList(),
+            SourceCodexVersion = string.IsNullOrWhiteSpace(request.SourceCodexVersion) ? "未知" : request.SourceCodexVersion,
+            EnvironmentManifest = request.EnvironmentManifest ?? new(), Preflight = request.Preflight };
         manifest.CoverageNotes.Add("范围仅限所选来源及已发现依赖；未挂载磁盘、外部服务、系统凭据和未知位置未由此备份保证覆盖。");
         manifest.CoverageNotes.Add("未使用密码加密；备份包含敏感原始配置。硬链接按独立内容副本保存，不保留共享 inode 关系。");
         progress?.Report(new("预检", "枚举文件并检查类型、权限与目标空间"));

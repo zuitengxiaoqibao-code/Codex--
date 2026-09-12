@@ -5,6 +5,67 @@ namespace CodexBackup.Tests;
 
 public class MigrationCoverageTests
 {
+    [Fact] public void ScanCountsSeparateUniqueSessionsAssociationsAndProjectLocations()
+    {
+        var scan = new ScanResult
+        {
+            Sessions =
+            [
+                new() { Id = "same", ProjectPath = "C:\\a", TranscriptPath = "C:\\t1" },
+                new() { Id = "same", ProjectPath = "C:\\a", TranscriptPath = "C:\\t2" },
+                new() { Id = "other", ProjectPath = "D:\\b", TranscriptPath = "D:\\t" }
+            ],
+            Items =
+            [
+                new() { Kind = SourceKind.Project, Path = "C:\\a" },
+                new() { Kind = SourceKind.Project, Path = "C:\\a" },
+                new() { Kind = SourceKind.Project, Path = "D:\\b" }
+            ]
+        };
+
+        Assert.Equal(2, scan.UniqueSessionCount);
+        Assert.Equal(3, scan.SessionAssociationCount);
+        Assert.Equal(2, scan.ProjectLocationCount);
+    }
+
+    [Fact] public void PreflightBlocksCompleteMigrationWhenTranscriptIsMissing()
+    {
+        using var t = new TestTree();
+        t.Write("home/config.toml", "");
+        t.Write("project/app.cs", "source");
+        var core = t.Source("home"); core.Kind = SourceKind.Core;
+        var project = t.Source("project"); project.Kind = SourceKind.Project;
+        var request = new BackupRequest
+        {
+            CompleteMigration = true,
+            Sources = [core, project],
+            Sessions = [new() { Id = "a", ProjectPath = project.Path, TranscriptPath = Path.Combine(core.Path, "missing.jsonl") }]
+        };
+        var scan = new ScanResult { Items = [core, project], Sessions = request.Sessions };
+
+        var report = PreflightReport.Build(scan, request);
+
+        Assert.Equal(PreflightStatus.Blocked, report.Status);
+        Assert.False(report.CanReinstall);
+        Assert.Contains(report.Findings, f => f.Code == "complete-file-missing");
+    }
+
+    [Fact] public async Task BackupManifestPersistsSourceVersionAndProductVersion()
+    {
+        using var t = new TestTree();
+        t.Write("project/app.cs", "source");
+        var source = t.Source("project"); source.Kind = SourceKind.Project;
+        var result = await new BackupEngine().BackupAsync(new BackupRequest
+        {
+            Sources = [source],
+            DestinationDirectory = t.Dir("backups"),
+            SourceCodexVersion = "26.903.9818.0"
+        });
+
+        Assert.Equal("26.903.9818.0", result.Manifest.SourceCodexVersion);
+        Assert.Equal(ProductInfo.Version, result.Manifest.ToolVersion);
+    }
+
     [Fact] public void BroadProjectContainingCoreCannotBeCalledComplete()
     {
         using var t=new TestTree(); t.Write("user/.codex/config.toml", "");
