@@ -5,7 +5,7 @@
  <Grid Grid.Row="1" Margin="24,18">
  <ScrollViewer x:Name="WelcomePage" VerticalScrollBarVisibility="Auto"><StackPanel MaxWidth="900">
  <TextBlock Text="保住会话，也要保住会话里的项目" FontSize="30" Margin="0,10,0,14"/><TextBlock Text="读取实际配置和会话记录，追踪各个本地盘符中的关联文件。改过默认目录也可以添加实际位置。默认完整迁移会检查会话、源码和必需文件是否齐全。" FontSize="16" TextWrapping="Wrap" LineHeight="26"/>
- <GroupBox Header="重装前请先知道"><TextBlock Text="• 会话不是源码备份。找不到源码或对话文件时，完整迁移会停止，告诉你缺少什么。&#10;• 正式备份前请正常退出 Codex、终端任务和相关工具，再重新扫描。&#10;• 备份可能含账号材料和私密记录，不自动加密，请保存在可信介质上。&#10;• 请先验证备份和试恢复，再清空旧盘。账号、运行环境和真实 Codex 可用性仍需在新系统验证。" TextWrapping="Wrap" LineHeight="26"/></GroupBox>
+ <GroupBox Header="重装前请先知道"><TextBlock Text="• 会话不是源码备份。找不到源码或对话文件时，完整迁移会停止，告诉你缺少什么。&#10;• 正式备份前请正常退出 Codex、终端任务和相关工具，再重新扫描。&#10;• 普通备份包不加密；可选密码保护包，但密码遗失后无法恢复。&#10;• 请先验证备份和试恢复，再清空旧盘。账号、运行环境和真实 Codex 可用性仍需在新系统验证。" TextWrapping="Wrap" LineHeight="26"/></GroupBox>
  <CheckBox x:Name="RiskAcknowledgement" Content="我理解文件完整、路径关联和实际程序可用性需要分别核对"/><Button Content="开始" Style="{StaticResource PrimaryButton}" HorizontalAlignment="Left" Click="WelcomeContinue_Click"/></StackPanel></ScrollViewer>
  <ScrollViewer x:Name="HomePage" Visibility="Collapsed"><StackPanel><TextBlock Text="你要做什么？" FontSize="28"/><UniformGrid Columns="3" Margin="0,20"><Button Height="150" Content="备份&#10;读取配置，保存会话与完整源码" Click="OpenBackup_Click"/><Button Height="150" Content="恢复&#10;一起迁移会话、项目和路径关联" Click="OpenRestore_Click"/><Button Height="150" Content="检查&#10;核对缺失项、备份包和回滚" Click="OpenCheck_Click"/></UniformGrid></StackPanel></ScrollViewer>
  <ScrollViewer x:Name="BackupPage" Visibility="Collapsed" VerticalScrollBarVisibility="Auto"><StackPanel>

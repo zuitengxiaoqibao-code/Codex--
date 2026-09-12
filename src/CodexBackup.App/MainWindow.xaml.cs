@@ -346,7 +346,7 @@ public partial class MainWindow : Window
             ClearRestorePreview("已一起设置会话、源码和记忆的位置。请检查路径；文件已存在时需要明确启用替换，随后重新预演。");
             if (verifiedPackage.Manifest.Roots.Count(r => r.Kind == SourceKind.Core) > 1) RestorePreviewList.Items.Add("备份中有多套 Codex 数据。第一套映射到当前程序目录，其他套保存在独立数据目录；不会合并会话数据库。需要使用其他套时，请在该数据目录下单独配置 CODEX_HOME。请核对表格中哪一套是你的主数据。");
         }
-        catch (Exception ex) { MessageBox.Show(this, UserGuidance.Error(ex), "无法设置恢复位置"); }
+        catch (Exception ex) { MessageBox.Show(this, UserGuidance.ExplainException(ex), "无法设置恢复位置"); }
     }
     private void OriginalLayout_Click(object sender, RoutedEventArgs e) => SetPlannedLayout(null, true);
     private void NewLayout_Click(object sender, RoutedEventArgs e) { var folder = PickFolder("选择新系统保存项目和数据的总目录"); if (folder is not null) SetPlannedLayout(folder, false); }

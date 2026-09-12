@@ -1,6 +1,6 @@
-# Codex Backup (Windows preview)
+# Codex Backup (Windows 0.3 preview)
 
-Offline .NET 10 / WPF backup, restore and verification tool with a Chinese UI.
+Offline .NET 10 / WPF backup, restore and verification tool with a Chinese UI. It follows the configured `CODEX_HOME`, session references and project paths across local drives; it does not assume that Codex lives on `C:`.
 
 ## Build
 
@@ -21,6 +21,23 @@ Start-Process .\CodexBackup.exe -ArgumentList '--smoke-test C:\Temp\backup-ui-sm
 ```
 
 Self-test creates random synthetic fixtures beside the report. Its final corruption test deliberately invalidates the synthetic backup. Smoke checks window initialization, rendering and navigation handlers, not the full native-dialog workflow. `--scan-report` produces a private path inventory: do not publish it.
+
+## Migration behavior
+
+The backup wizard presents three preflight outcomes: `可以重装`, `需要处理后再重装`, and `仅可抢救`. A complete result requires every discovered session to have both its transcript and project directory, and preserves Git pointers and the external memory-vault pointer when they are readable. Unique session IDs, association rows and project locations are shown separately so repeated references are not mistaken for independent conversations.
+
+The restore wizard requires an explicit primary Core when a package contains multiple Core homes. A managed replacement can be blocked when the source and target Codex versions are unknown or differ; isolated extraction remains available. Configuration, credentials, skills, plugins, automations and peripheral tools are retained for review but are never silently enabled. After file verification, the application layer remains pending until a user starts Codex, checks the sidebar and opens representative projects.
+
+Password-protected packages use a chunked authenticated AES-GCM envelope. The password is held only in memory, is never written to `manifest.json` or reports, and cannot be recovered if lost. Keep two copies on different physical media and perform a second verification before deleting the old system.
+
+The official Codex repository documents configuration as `config.toml` plus managed `requirements.toml` layers and directs users to the online configuration reference. The online reference may be unavailable behind access controls; fields that this tool cannot verify locally are reported as unknown and are not auto-restored.
+
+Release checks:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\verify-release.ps1 -ReleaseDirectory C:\path\to\outputs\v0.3
+powershell -ExecutionPolicy Bypass -File .\scripts\sign-release.ps1 -ReleaseDirectory C:\path\to\outputs\v0.3
+```
 
 ## Safety and acceptance
 
