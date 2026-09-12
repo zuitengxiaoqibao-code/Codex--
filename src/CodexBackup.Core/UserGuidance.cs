@@ -2,6 +2,20 @@ namespace CodexBackup.Core;
 
 public static class UserGuidance
 {
+    public static string ExplainException(Exception error)
+    {
+        var message = Sanitize(error.Message);
+        return error switch
+        {
+            UnauthorizedAccessException => $"原因：当前用户没有这个位置的读取或写入权限。\n影响：本次结果不能算作成功，原数据不会被当作已备份。\n处理：改选你有权限的目录，或关闭占用程序后重试。{message}",
+            IOException => $"原因：文件正在使用、磁盘空间不足、磁盘断开，或文件在操作期间发生变化。\n影响：备份或恢复可能不完整，不能清空旧系统。\n处理：关闭 Codex、终端任务和外围工具，确认磁盘空间与连接后重试；恢复失败时保留日志和辅助目录。{message}",
+            System.Security.Cryptography.CryptographicException => $"原因：密码不正确，或加密备份内容已经损坏。\n影响：无法安全读取备份，不能继续恢复。\n处理：重新输入创建备份时的密码；如果密码遗失，只能使用另一份备份。",
+            ArgumentException => $"原因：路径或选项格式不正确。\n影响：目标位置没有被修改。\n处理：选择有效的本地 NTFS 文件夹，并重新预演。{message}",
+            BackupException => $"原因：{message}\n影响：当前步骤没有被当作成功，必要时仍可使用检查或回滚。\n处理：按上面的说明处理后重试；不要删除原数据或恢复辅助目录。",
+            _ => $"原因：程序无法确认这一步是否安全完成。\n影响：当前结果不能算作成功。\n处理：保留现有备份和日志，打开“检查”查看详细记录后重试。{message}"
+        };
+    }
+
     public static string Explain(Finding finding)
     {
         var code = finding.Code;
@@ -23,4 +37,12 @@ public static class UserGuidance
         IOException => "文件操作没有完成。\n可能是文件正在使用、空间不够或磁盘断开。请检查磁盘连接和剩余空间，关闭相关程序后重试。\n如果正在恢复，请保留回滚日志和旁边的辅助目录。",
         _ => "操作未完成，不能把当前结果当作成功。\n请保留现有备份和恢复日志，重新打开程序后使用“检查”。若仍失败，请保存详细记录供排查。"
     };
+
+    private static string Sanitize(string message)
+    {
+        if (string.IsNullOrWhiteSpace(message)) return "";
+        foreach (var typeName in new[] { "IOException", "UnauthorizedAccessException", "InvalidDataException", "CryptographicException", "ArgumentException", "BackupException" })
+            message = message.Replace(typeName, "文件操作错误", StringComparison.OrdinalIgnoreCase);
+        return "\n技术信息：" + message;
+    }
 }

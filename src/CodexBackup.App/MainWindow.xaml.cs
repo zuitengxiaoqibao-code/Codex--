@@ -131,6 +131,12 @@ public partial class MainWindow : Window
         if (SourcesGrid is null) return;
         ApplyBackupMode(); RefreshCoverage();
     }
+    private void EncryptionModeChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (EncryptionPasswordBox is null) return;
+        EncryptionPasswordBox.Visibility = EncryptionModeBox.SelectedIndex == 1 ? Visibility.Visible : Visibility.Collapsed;
+        if (EncryptionModeBox.SelectedIndex != 1) EncryptionPasswordBox.Clear();
+    }
     private void ApplyBackupMode()
     {
         var complete = BackupModeBox.SelectedIndex == 0;
@@ -144,19 +150,33 @@ public partial class MainWindow : Window
         }
         SourcesGrid.Items.Refresh();
     }
-    private BackupRequest CurrentBackupRequest() => new()
+    private BackupRequest CurrentBackupRequest()
     {
-        Sources = sources.ToList(), DestinationDirectory = BackupDestinationBox.Text.Trim(), CompleteMigration = BackupModeBox.SelectedIndex == 0,
-        Sessions = scan?.Sessions.ToList() ?? [], DiscoveryFindings = scan?.Findings.ToList() ?? [],
-        CoverageNotes = scan?.Findings.Select(UserGuidance.Explain).ToList() ?? [], PathReplacements = new(pathReplacements, StringComparer.OrdinalIgnoreCase)
-    };
+        var request = new BackupRequest
+        {
+            Sources = sources.ToList(), DestinationDirectory = BackupDestinationBox.Text.Trim(), CompleteMigration = BackupModeBox.SelectedIndex == 0,
+            Sessions = scan?.Sessions.ToList() ?? [], DiscoveryFindings = scan?.Findings.ToList() ?? [],
+            CoverageNotes = scan?.Findings.Select(UserGuidance.Explain).ToList() ?? [], PathReplacements = new(pathReplacements, StringComparer.OrdinalIgnoreCase),
+            SourceCodexVersion = scan?.CodexVersion ?? "未知", EnvironmentManifest = scan?.EnvironmentManifest ?? new(),
+            EncryptionPassword = EncryptionModeBox.SelectedIndex == 1 ? EncryptionPasswordBox.Password : null
+        };
+        if (scan is not null) request.Preflight = PreflightReport.Build(scan, request);
+        return request;
+    }
     private void RefreshCoverage()
     {
         if (scan is null || CoverageSummaryText is null) return;
         var gaps = MigrationCoverage.Evaluate(CurrentBackupRequest());
         var drives = sources.Where(s => s.Exists).Select(s => Path.GetPathRoot(s.Path)).Distinct(StringComparer.OrdinalIgnoreCase);
-        CoverageSummaryText.Text = $"已发现 {scan.Sessions.Count} 个会话关联、{sources.Count(s => s.Kind == SourceKind.Project)} 个项目位置。涉及磁盘：{string.Join("、", drives)}。\n" +
+        var preflight = PreflightReport.Build(scan, CurrentBackupRequest());
+        CoverageSummaryText.Text = $"独立会话 {scan.UniqueSessionCount} 个；会话关联记录 {scan.SessionAssociationCount} 条；项目位置 {scan.ProjectLocationCount} 个。涉及磁盘：{string.Join("、", drives)}。\n" +
             (BackupModeBox.SelectedIndex != 0 ? "当前是自选 / 抢救模式，结果不会标记为完整迁移。" : gaps.Count == 0 ? "本次扫描的会话与项目已选齐。备份时还会按真实文件清单再次核对。" : $"还有 {gaps.Count} 项需要处理，暂不能制作完整迁移包。");
+        PreflightStatusText.Text = preflight.Status switch
+        {
+            PreflightStatus.Ready => "重装判定：可以重装（仍需完成备份包校验和新系统人工验收）",
+            PreflightStatus.Blocked => $"重装判定：需要处理后再重装（还有 {gaps.Count} 项必须处理）",
+            _ => "重装判定：仅可抢救（当前选择允许部分保存，不能保证完整迁移）"
+        };
         BackupFindingsList.Items.Clear();
         foreach (var finding in gaps.Concat(scan.Findings.Where(f => f.Code != "known-location-missing" && (!f.Code.Contains("missing") || BackupModeBox.SelectedIndex != 0))).DistinctBy(f => (f.Code, f.Path)).Take(150))
             BackupFindingsList.Items.Add(UserGuidance.Explain(finding));
@@ -188,7 +208,8 @@ public partial class MainWindow : Window
         RefreshCoverage();
         var request = CurrentBackupRequest();
         if (MigrationCoverage.Evaluate(request).Count > 0) { MessageBox.Show(this, "会话与源码还没有核对齐全。请先处理列表里的缺失位置或扫描问题；完整迁移不会跳过这些内容。", "暂不能完整备份", MessageBoxButton.OK, MessageBoxImage.Warning); return; }
-        if (BackupReviewCheck.IsChecked != true) { MessageBox.Show(this, "请确认备份包的保存位置与未加密风险。", "需要确认"); return; }
+        if (EncryptionModeBox.SelectedIndex == 1 && (string.IsNullOrWhiteSpace(EncryptionPasswordBox.Password) || EncryptionPasswordBox.Password.Length < 8)) { MessageBox.Show(this, "密码保护需要至少 8 个字符。密码遗失后无法恢复，请妥善保存。", "密码不完整", MessageBoxButton.OK, MessageBoxImage.Warning); return; }
+        if (BackupReviewCheck.IsChecked != true) { MessageBox.Show(this, "请确认备份包的保存位置，以及是否使用密码保护。", "需要确认"); return; }
         var destination = BackupDestinationBox.Text.Trim();
         if (string.IsNullOrWhiteSpace(destination)) { MessageBox.Show(this, "请选择备份保存目录。", "缺少目标"); return; }
         if (IsCurrentProcessLocation(destination)) { MessageBox.Show(this, "保存目录与本程序运行目录重叠，目标含义不明确。请选择独立目录。", "路径冲突", MessageBoxButton.OK, MessageBoxImage.Warning); return; }
@@ -202,25 +223,61 @@ public partial class MainWindow : Window
 
     private async void ChooseRestorePackage_Click(object sender, RoutedEventArgs e)
     {
-        var path = PickFolder("选择包含 COMPLETE.json 的备份包目录"); if (path is null) return;
+        string? path = null;
+        var fileDialog = new OpenFileDialog { Title = "选择密码保护备份文件（取消后可选择普通备份目录）", Filter = "密码保护备份 (*.codexenc)|*.codexenc|所有文件 (*.*)|*.*", CheckFileExists = true };
+        if (fileDialog.ShowDialog() == true) path = fileDialog.FileName;
+        else path = PickFolder("选择包含 COMPLETE.json 的普通备份包目录");
+        if (path is null) return;
         RestorePackageBox.Text = path;
+        if (EncryptedPackage.IsEncryptedFile(path) && string.IsNullOrWhiteSpace(RestoreEncryptionPasswordBox.Password))
+        {
+            verifiedPackage = null; RestorePreviewList.Items.Clear();
+            RestoreCoverageText.Text = "这是密码保护备份包。请输入密码后点击“验证”；密码错误或遗失时不会写入目标。";
+            return;
+        }
+        await VerifySelectedRestorePackageAsync();
+    }
+
+    private async void VerifyRestorePackage_Click(object sender, RoutedEventArgs e) => await VerifySelectedRestorePackageAsync();
+
+    private async Task VerifySelectedRestorePackageAsync()
+    {
+        var path = RestorePackageBox.Text.Trim();
+        if (string.IsNullOrWhiteSpace(path)) { MessageBox.Show(this, "请先选择备份包文件或目录。", "缺少备份包"); return; }
+        var encrypted = EncryptedPackage.IsEncryptedFile(path);
+        if (encrypted && string.IsNullOrWhiteSpace(RestoreEncryptionPasswordBox.Password)) { MessageBox.Show(this, "这是密码保护备份包，请先输入密码。", "需要密码"); return; }
         await RunBusyAsync("正在完整校验备份包…", async (progress, ct) =>
         {
-            verifiedPackage = await Task.Run(() => verifier.VerifyAsync(path, progress, ct), ct);
+            var package = encrypted
+                ? await Task.Run(() => verifier.VerifyAsync(path, RestoreEncryptionPasswordBox.Password, progress, ct), ct)
+                : await Task.Run(() => verifier.VerifyAsync(path, progress, ct), ct);
+            EncryptedPackage.CleanupExtractedPackage(package.PackagePath);
+            verifiedPackage = encrypted ? package with { PackagePath = path } : package;
             mappings.Clear();
             var isolatedBase = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), "Codex-Restored", verifiedPackage.Manifest.BackupId);
             foreach (var root in verifiedPackage.Manifest.Roots)
                 mappings.Add(new MappingRow(root.Id, root.OriginalPath, Path.Combine(isolatedBase, SafeName(root.Name, root.Id) + "-" + root.Id[..8]), root.Kind));
+            var firstCore = mappings.FirstOrDefault(x => x.Kind == SourceKind.Core); if (firstCore is not null) firstCore.IsPrimary = true;
+            PrimaryCoreList.ItemsSource = mappings.Where(x => x.Kind == SourceKind.Core).ToList();
+            SourceCodexVersionText.Text = verifiedPackage.Manifest.SourceCodexVersion;
+            TargetCodexVersionBox.Text = "";
             restorePreview = null; previewFingerprint = null; RestorePreviewList.Items.Clear();
             RestorePreviewList.Items.Add($"备份包完整性通过：{verifiedPackage.Manifest.FileCount:N0} 个文件，{FormatBytes(verifiedPackage.Manifest.TotalBytes)}。");
             RestorePreviewList.Items.Add("尚未执行恢复预演；文件校验不代表应用层验收通过。");
-            RestoreCoverageText.Text = verifiedPackage.Manifest.CompleteMigration ? $"这是完整迁移包，含 {verifiedPackage.Manifest.Sessions.Count} 个会话关联。请选择原布局或新的文件夹，同时恢复会话和源码。" : "这是旧版或自选 / 抢救包，缺少完整关联证明。可以解出文件，但不能保证会话对应源码齐全；建议回原电脑用新版重新备份。";
+            RestoreCoverageText.Text = verifiedPackage.Manifest.CompleteMigration ? $"这是完整迁移包，含 {verifiedPackage.Manifest.Sessions.Count} 条会话关联（独立会话数需结合清单核对）。请选择原布局或新的文件夹，同时恢复会话和源码。" : "这是旧版或自选 / 抢救包，缺少完整关联证明。可以解出文件，但不能保证会话对应源码齐全；建议回原电脑用新版重新备份。";
             RequireCompleteCheck.IsChecked = verifiedPackage.Manifest.CompleteMigration;
             IsolatedCheck.IsChecked = true;
         });
     }
 
     private void RestoreOptionChanged(object sender, RoutedEventArgs e) { ClearRestorePreview("恢复选项已更改，请重新预演。"); }
+    private void PrimaryCore_Checked(object sender, RoutedEventArgs e)
+    {
+        if (sender is not RadioButton { DataContext: MappingRow selected }) return;
+        foreach (var row in mappings.Where(x => x.Kind == SourceKind.Core)) row.IsPrimary = row == selected;
+        MappingsGrid.Items.Refresh();
+        ClearRestorePreview("主 Core 已更改，请重新预演；其他 Core 会保存在独立目录，不会合并数据库。");
+    }
 
     private void MapCoreToRuntime_Click(object sender, RoutedEventArgs e)
     {
@@ -235,11 +292,12 @@ public partial class MainWindow : Window
             return;
         }
         var core = allCore.Count == 1 ? allCore[0] : selectedCore[0];
-        core.Selected = true;
+        core.Selected = true; foreach (var row in allCore) row.IsPrimary = row == core;
         try { core.TargetPath = RuntimeCodexHome(); }
         catch (Exception ex) when (ex is BackupException or ArgumentException or NotSupportedException)
         { MessageBox.Show(this, "本机 CODEX_HOME 不是有效的绝对本地路径，请检查环境变量或手动填写。", "无法自动映射", MessageBoxButton.OK, MessageBoxImage.Warning); return; }
         MappingsGrid.Items.Refresh();
+        PrimaryCoreList.Items.Refresh();
         IsolatedCheck.IsChecked = false;
         ClearRestorePreview("已将所选核心映射到本机 Codex 数据目录。其他根仍使用表格中的隔离目标；配置、凭据、技能、插件和自动化不会自动启用，恢复后必须重新登录并审核。");
     }
@@ -268,7 +326,10 @@ public partial class MainWindow : Window
         Isolated = IsolatedCheck.IsChecked == true,
         ReplaceExisting = ReplaceExistingCheck.IsChecked == true,
         RequireCompleteMigration = RequireCompleteCheck.IsChecked == true,
-        Mappings = mappings.Where(x => x.Selected).Select(x => new RestoreMapping { RootId = x.RootId, TargetPath = x.TargetPath.Trim() }).ToList()
+        Mappings = mappings.Where(x => x.Selected).Select(x => new RestoreMapping { RootId = x.RootId, TargetPath = x.TargetPath.Trim() }).ToList(),
+        PrimaryCoreRootId = mappings.FirstOrDefault(x => x.Selected && x.Kind == SourceKind.Core && x.IsPrimary)?.RootId,
+        TargetCodexVersion = string.IsNullOrWhiteSpace(TargetCodexVersionBox.Text) || TargetCodexVersionBox.Text.Trim().Equals("未知", StringComparison.OrdinalIgnoreCase) ? null : TargetCodexVersionBox.Text.Trim(),
+        EncryptionPassword = EncryptedPackage.IsEncryptedFile(RestorePackageBox.Text) ? RestoreEncryptionPasswordBox.Password : null
     };
 
     private void SetPlannedLayout(string? newBase, bool original)
@@ -278,7 +339,8 @@ public partial class MainWindow : Window
         {
             var planned = RestorePlanner.CreateMappings(verifiedPackage.Manifest, newBase, RuntimeCodexHome(), original);
             mappings.Clear();
-            foreach (var mapping in planned) { var root = verifiedPackage.Manifest.Roots.Single(r => r.Id == mapping.RootId); mappings.Add(new MappingRow(root.Id, root.OriginalPath, mapping.TargetPath, root.Kind)); }
+            foreach (var mapping in planned) { var root = verifiedPackage.Manifest.Roots.Single(r => r.Id == mapping.RootId); mappings.Add(new MappingRow(root.Id, root.OriginalPath, mapping.TargetPath, root.Kind) { IsPrimary = root.Kind == SourceKind.Core && mapping.RootId == planned.FirstOrDefault(x => verifiedPackage.Manifest.Roots.Single(r => r.Id == x.RootId).Kind == SourceKind.Core)?.RootId }); }
+            PrimaryCoreList.ItemsSource = mappings.Where(x => x.Kind == SourceKind.Core).ToList();
             IsolatedCheck.IsChecked = false;
             RequireCompleteCheck.IsChecked = true;
             ClearRestorePreview("已一起设置会话、源码和记忆的位置。请检查路径；文件已存在时需要明确启用替换，随后重新预演。");
@@ -293,6 +355,7 @@ public partial class MainWindow : Window
         if (verifiedPackage is null) { MessageBox.Show(this, "请先选择备份包。"); return; }
         var isolatedBase = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), "Codex-Restored", verifiedPackage.Manifest.BackupId);
         mappings.Clear(); foreach (var root in verifiedPackage.Manifest.Roots) mappings.Add(new MappingRow(root.Id, root.OriginalPath, Path.Combine(isolatedBase, SafeName(root.Name, root.Id) + "-" + root.Id[..8]), root.Kind));
+        PrimaryCoreList.ItemsSource = mappings.Where(x => x.Kind == SourceKind.Core).ToList();
         IsolatedCheck.IsChecked = true; RequireCompleteCheck.IsChecked = false; ClearRestorePreview("此操作只解出文件供核对，不接入 Codex，不作为可直接使用的迁移结果。");
     }
 
@@ -327,7 +390,16 @@ public partial class MainWindow : Window
         await RunBusyAsync("正在恢复并写入回滚日志…", async (progress, ct) =>
         {
             var result = await Task.Run(() => restoreEngine.RestoreAsync(request, progress, ct), ct);
-            ShowResult("恢复文件已写入，等待人工验收", $"已恢复 {result.RestoredPaths.Count} 个根路径。回滚日志已保存；请启动 Codex 手动检查登录、会话、项目、技能与记忆。", result.JournalPath, result.Notes);
+            var acceptance = result.Acceptance;
+            var status = acceptance?.StructuralStatus == RestoreStructuralStatus.Passed ? "结构验收通过" : "结构验收未通过，先处理阻断项";
+            var details = result.Notes.ToList();
+            if (acceptance is not null)
+            {
+                details.Add($"结构验收：{status}；应用验收：待人工检查（不会自动登录、启用插件或运行项目）。");
+                details.AddRange(acceptance.Checks.Select(c => $"[{c.Level}] {c.Message}"));
+                details.AddRange(acceptance.DisabledIntegrations.Select(x => $"已保存但保持停用：{x.SourcePath}；人工处理：{x.ManualReviewAction}"));
+            }
+            ShowResult("恢复文件已写入，等待人工验收", $"已恢复 {result.RestoredPaths.Count} 个根路径。{status}。回滚日志已保存；请启动 Codex 手动检查登录、会话、项目、技能与记忆。", result.JournalPath, details);
         });
     }
 
@@ -336,17 +408,26 @@ public partial class MainWindow : Window
         await RunBusyAsync("正在只读扫描当前环境…", async (progress, ct) =>
         {
             var result = await Task.Run(() => discovery.ScanAsync(null, progress, ct), ct);
-            CheckResultsList.Items.Clear(); CheckResultsList.Items.Add($"发现 {result.Items.Count} 个来源，Codex 版本：{result.CodexVersion}。覆盖范围外的内容仍为未知。");
+            CheckResultsList.Items.Clear(); CheckResultsList.Items.Add($"发现 {result.Items.Count} 个来源；独立会话 {result.UniqueSessionCount} 个，关联记录 {result.SessionAssociationCount} 条，项目位置 {result.ProjectLocationCount} 个；Codex 版本：{result.CodexVersion}。覆盖范围外的内容仍为未知。");
             foreach (var finding in result.Findings) CheckResultsList.Items.Add(FormatFinding(finding));
+            var artifacts = TemporaryArtifactManager.List(Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments));
+            if (artifacts.Count > 0) CheckResultsList.Items.Add($"发现 {artifacts.Count} 个恢复辅助目录或未完成备份；未通过验收前不要删除，可在技术记录中逐项核对。");
         });
     }
 
     private async void VerifyPackage_Click(object sender, RoutedEventArgs e)
     {
-        var path = PickFolder("选择要完整校验的备份包"); if (path is null) return; CheckPackageBox.Text = path;
+        string? path = null;
+        var fileDialog = new OpenFileDialog { Title = "选择密码保护备份文件（取消后可选择普通备份目录）", Filter = "密码保护备份 (*.codexenc)|*.codexenc|所有文件 (*.*)|*.*", CheckFileExists = true };
+        if (fileDialog.ShowDialog() == true) path = fileDialog.FileName; else path = PickFolder("选择要完整校验的普通备份包");
+        if (path is null) return; CheckPackageBox.Text = path;
+        if (EncryptedPackage.IsEncryptedFile(path) && string.IsNullOrWhiteSpace(RestoreEncryptionPasswordBox.Password)) { CheckResultsList.Items.Clear(); CheckResultsList.Items.Add("这是密码保护备份。请在恢复页输入密码，再回到这里重新检查。"); return; }
         await RunBusyAsync("正在读取清单并校验全部载荷…", async (progress, ct) =>
         {
-            var package = await Task.Run(() => verifier.VerifyAsync(path, progress, ct), ct);
+            var package = EncryptedPackage.IsEncryptedFile(path)
+                ? await Task.Run(() => verifier.VerifyAsync(path, RestoreEncryptionPasswordBox.Password, progress, ct), ct)
+                : await Task.Run(() => verifier.VerifyAsync(path, progress, ct), ct);
+            EncryptedPackage.CleanupExtractedPackage(package.PackagePath);
             CheckResultsList.Items.Clear();
             CheckResultsList.Items.Add($"文件完整性校验通过：{package.Manifest.FileCount:N0} 个文件，{FormatBytes(package.Manifest.TotalBytes)}。");
             CheckResultsList.Items.Add(package.Manifest.CompleteMigration ? $"清单包含 {package.Manifest.Sessions.Count} 个会话与项目关联，已核对对应文件存在。" : "该包不是经新版核对的完整迁移包，不能证明源码与会话齐全。");
@@ -430,7 +511,7 @@ public partial class MainWindow : Window
 
     private static string FormatFinding(Finding f) => UserGuidance.Explain(f);
     private static string FormatBytes(long bytes) => bytes >= 1L << 30 ? $"{bytes / (double)(1L << 30):N2} GiB" : bytes >= 1L << 20 ? $"{bytes / (double)(1L << 20):N2} MiB" : $"{bytes / 1024d:N1} KiB";
-    private static string UserMessage(Exception ex) => UserGuidance.Error(ex);
+    private static string UserMessage(Exception ex) => UserGuidance.ExplainException(ex);
 }
 
 public sealed class MappingRow
@@ -444,7 +525,9 @@ public sealed class MappingRow
     public string TargetPath { get; set; }
     public SourceKind Kind { get; }
     public string KindText => SourceKindChineseConverter.ToChinese(Kind);
+    public string Display => $"{KindText} · {OriginalPath}";
     public bool Selected { get; set; } = true;
+    public bool IsPrimary { get; set; }
 }
 
 public sealed class SourceKindChineseConverter : IValueConverter
