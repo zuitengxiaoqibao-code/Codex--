@@ -3,6 +3,21 @@ using System.Text.RegularExpressions;
 namespace CodexBackup.Core;
 public sealed class PackageVerifier
 {
+    public async Task<VerifiedPackage> VerifyAsync(string packagePath, string password, IProgress<OperationProgress>? progress = null, CancellationToken cancellationToken = default)
+    {
+        if (!EncryptedPackage.IsEncryptedFile(packagePath)) return await VerifyAsync(packagePath, progress, cancellationToken);
+        var extracted = await EncryptedPackage.ExtractAsync(packagePath, password, progress, cancellationToken);
+        try
+        {
+            return await VerifyAsync(extracted, progress, cancellationToken);
+        }
+        catch
+        {
+            EncryptedPackage.CleanupExtractedPackage(extracted);
+            throw;
+        }
+    }
+
     public async Task<VerifiedPackage> VerifyAsync(string packagePath, IProgress<OperationProgress>? progress = null, CancellationToken cancellationToken = default)
     {
         var ct = cancellationToken;

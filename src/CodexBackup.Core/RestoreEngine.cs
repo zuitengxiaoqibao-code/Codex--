@@ -7,8 +7,19 @@ public sealed class RestoreEngine
     internal Action<string>? Checkpoint { get; init; }
     public async Task<RestorePreview> PreviewAsync(RestoreRequest request, CancellationToken cancellationToken = default)
     {
-        var package = await new PackageVerifier().VerifyAsync(request.PackagePath, cancellationToken:cancellationToken);
-        return BuildPreview(request, package);
+        var package = await VerifyPackageAsync(request, cancellationToken: cancellationToken);
+        try { return BuildPreview(request, package); }
+        finally { EncryptedPackage.CleanupExtractedPackage(package.PackagePath); }
+    }
+
+    private static Task<VerifiedPackage> VerifyPackageAsync(RestoreRequest request, IProgress<OperationProgress>? progress = null, CancellationToken cancellationToken = default)
+    {
+        if (EncryptedPackage.IsEncryptedFile(request.PackagePath))
+        {
+            if (string.IsNullOrWhiteSpace(request.EncryptionPassword)) throw new BackupException("这是加密备份，请输入创建备份时设置的密码；密码丢失后无法恢复。");
+            return new PackageVerifier().VerifyAsync(request.PackagePath, request.EncryptionPassword, progress, cancellationToken);
+        }
+        return new PackageVerifier().VerifyAsync(request.PackagePath, progress, cancellationToken: cancellationToken);
     }
 
     internal static RestorePreview BuildPreview(RestoreRequest request, VerifiedPackage package)
@@ -61,7 +72,7 @@ public sealed class RestoreEngine
     {
         var ct = cancellationToken;
         ct.ThrowIfCancellationRequested();
-        var package = await new PackageVerifier().VerifyAsync(request.PackagePath, progress, ct);
+        var package = await VerifyPackageAsync(request, progress, ct);
         var preview = BuildPreview(request, package);
         if (!preview.CanProceed) throw new BackupException(string.Join(Environment.NewLine, preview.Findings.Where(f => f.Level == FindingLevel.Blocker).Select(f => f.Message)));
         var journal = new RestoreJournal();
@@ -171,8 +182,10 @@ public sealed class RestoreEngine
         }
         catch (Exception ex)
         {
+            EncryptedPackage.CleanupExtractedPackage(package.PackagePath);
             throw new BackupException($"恢复未完成（{ex.GetType().Name}）。请勿删除辅助目录；部分步骤可能已经完成。可在“检查 → 回滚恢复”选择日志：{journalPath}。原因：{ex.Message}");
         }
+        finally { EncryptedPackage.CleanupExtractedPackage(package.PackagePath); }
     }
 
     public async Task RollbackAsync(string journalPath, CancellationToken cancellationToken = default)

@@ -75,6 +75,14 @@ public sealed class BackupEngine
         FileIO.WriteJsonDurable(Path.Combine(staging, "COMPLETE.json"), marker);
         var final = Path.Combine(target, name);
         Directory.Move(staging, final);
+        if (!string.IsNullOrWhiteSpace(request.EncryptionPassword))
+        {
+            var encrypted = final + ".codexenc";
+            var encryptedPath = await EncryptedPackage.CreateAsync(final, encrypted, request.EncryptionPassword, progress, ct);
+            Directory.Delete(final, true);
+            progress?.Report(new("完成", "加密备份已写入并验证；原始明文包已移除", count, copied, manifest.TotalBytes));
+            return new(encryptedPath, manifest);
+        }
         progress?.Report(new("完成", "所选范围文件校验通过；请查看未覆盖范围与报告", count, copied, manifest.TotalBytes));
         return new(final, manifest);
     }

@@ -66,6 +66,8 @@ public sealed class BackupRequest
     public string SourceCodexVersion { get; set; } = "未知";
     public EnvironmentManifest EnvironmentManifest { get; set; } = new();
     public PreflightReport? Preflight { get; set; }
+    /// <summary>Optional in-memory password; never serialized into a manifest or report.</summary>
+    public string? EncryptionPassword { get; set; }
 }
 public sealed record BackupResult(string PackagePath, BackupManifest Manifest);
 
@@ -126,6 +128,8 @@ public sealed class RestoreRequest
     public bool RequireCompleteMigration { get; set; }
     public string? PrimaryCoreRootId { get; set; }
     public string? TargetCodexVersion { get; set; }
+    /// <summary>Optional in-memory password for an encrypted package; never persisted.</summary>
+    public string? EncryptionPassword { get; set; }
 }
 public sealed record RestorePreview(IReadOnlyList<RestorePreviewItem> Items, IReadOnlyList<Finding> Findings, long TotalBytes)
 {
