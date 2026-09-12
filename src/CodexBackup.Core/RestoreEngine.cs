@@ -17,6 +17,8 @@ public sealed class RestoreEngine
         var items = new List<RestorePreviewItem>();
         var rootMap = package.Manifest.Roots.ToDictionary(r => r.Id);
         try {RestorePlanner.ValidateCoverage(package,request);} catch(BackupException ex) {findings.Add(new(FindingLevel.Blocker,"COMPLETE_COVERAGE",ex.Message));}
+        try { RestorePlanner.ValidateCoreSelection(package.Manifest, request); }
+        catch (BackupException ex) { findings.Add(new(FindingLevel.Blocker, "CORE_SELECTION", ex.Message)); }
         if (request.Mappings.Count == 0 || request.Mappings.Count > rootMap.Count || request.Mappings.Select(m => m.RootId).Distinct().Count() != request.Mappings.Count)
             findings.Add(new(FindingLevel.Blocker, "MAPPINGS", "至少选择一个根目录；同一根目录不能映射两次。"));
         foreach (var mapping in request.Mappings)

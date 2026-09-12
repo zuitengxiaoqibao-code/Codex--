@@ -124,6 +124,8 @@ public sealed class RestoreRequest
     public bool ReplaceExisting { get; set; }
     public bool Isolated { get; set; } = true;
     public bool RequireCompleteMigration { get; set; }
+    public string? PrimaryCoreRootId { get; set; }
+    public string? TargetCodexVersion { get; set; }
 }
 public sealed record RestorePreview(IReadOnlyList<RestorePreviewItem> Items, IReadOnlyList<Finding> Findings, long TotalBytes)
 {

@@ -56,6 +56,28 @@ public static class RestorePlanner
         }
         return result;
     }
+    public static void ValidateCoreSelection(BackupManifest manifest, RestoreRequest request)
+    {
+        var cores = manifest.Roots.Where(r => r.Kind == SourceKind.Core).ToList();
+        if (cores.Count == 0) return;
+        var primary = request.PrimaryCoreRootId;
+        if (cores.Count > 1 && string.IsNullOrWhiteSpace(primary))
+            throw new BackupException("备份包含多套 Codex 数据，请明确选择一套作为当前系统的主 Core；其他 Core 将单独保存，不会合并。");
+        if (!string.IsNullOrWhiteSpace(primary) && cores.All(r => !r.Id.Equals(primary, StringComparison.Ordinal)))
+            throw new BackupException("选择的主 Core 不在备份清单中，请重新选择。");
+        if (!request.Isolated)
+        {
+            var source = manifest.SourceCodexVersion?.Trim();
+            var target = request.TargetCodexVersion?.Trim();
+            if (request.TargetCodexVersion is not null)
+            {
+                if (string.IsNullOrWhiteSpace(source) || source.Equals("未知", StringComparison.OrdinalIgnoreCase) || string.IsNullOrWhiteSpace(target) || target.Equals("未知", StringComparison.OrdinalIgnoreCase))
+                    throw new BackupException("无法确认来源或目标 Codex 版本。为避免核心数据库被错误接管，请先安装并确认兼容版本，或改用隔离恢复。");
+                if (!source.Equals(target, StringComparison.OrdinalIgnoreCase))
+                    throw new BackupException($"来源 Codex 版本为 {source}，目标版本为 {target}，版本不一致。请安装相同版本，或改用隔离恢复。");
+            }
+        }
+    }
     internal static (BackupRoot Root,FileRecord Record) Resolve(VerifiedPackage package,string oldPath,bool directory)
     {
         var aliases=package.Manifest.PathReplacements.ToDictionary(p=>Normalize(p.Key),p=>Normalize(p.Value),StringComparer.OrdinalIgnoreCase);

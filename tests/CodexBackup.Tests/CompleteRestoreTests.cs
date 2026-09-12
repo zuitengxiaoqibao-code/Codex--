@@ -5,6 +5,49 @@ namespace CodexBackup.Tests;
 
 public class CompleteRestoreTests
 {
+    [Fact] public void MultipleCoreHomesRequireExplicitPrimaryForManagedRestore()
+    {
+        var manifest = new BackupManifest
+        {
+            Roots =
+            [
+                new() { Id = "a", Kind = SourceKind.Core, OriginalPath = "C:\\old-core" },
+                new() { Id = "b", Kind = SourceKind.Core, OriginalPath = "D:\\other-core" }
+            ],
+            SourceCodexVersion = "26.903.9818.0"
+        };
+        var request = new RestoreRequest
+        {
+            Isolated = false,
+            PrimaryCoreRootId = null,
+            TargetCodexVersion = "26.903.9818.0",
+            Mappings = [new() { RootId = "a", TargetPath = "C:\\new" }, new() { RootId = "b", TargetPath = "D:\\other" }]
+        };
+
+        Assert.Throws<BackupException>(() => RestorePlanner.ValidateCoreSelection(manifest, request));
+        request.PrimaryCoreRootId = "a";
+        RestorePlanner.ValidateCoreSelection(manifest, request);
+    }
+
+    [Fact] public void ManagedRestoreBlocksVersionMismatchButIsolationRemainsAvailable()
+    {
+        var manifest = new BackupManifest
+        {
+            Roots = [new() { Id = "a", Kind = SourceKind.Core, OriginalPath = "C:\\old-core" }],
+            SourceCodexVersion = "26.903.9818.0"
+        };
+        var request = new RestoreRequest
+        {
+            Isolated = false,
+            TargetCodexVersion = "27.001.0000.0",
+            Mappings = [new() { RootId = "a", TargetPath = "C:\\new" }]
+        };
+
+        Assert.Throws<BackupException>(() => RestorePlanner.ValidateCoreSelection(manifest, request));
+        request.Isolated = true;
+        RestorePlanner.ValidateCoreSelection(manifest, request);
+    }
+
     [Fact] public void MultipleCoreHomesNeverShareOneDestination()
     {
         var manifest=new BackupManifest { Roots=[new(){Id="a",Kind=SourceKind.Core,OriginalPath="C:\\old-core"},new(){Id="b",Kind=SourceKind.Core,OriginalPath="D:\\other-core"}] };
