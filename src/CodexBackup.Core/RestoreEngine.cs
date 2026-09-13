@@ -108,9 +108,9 @@ public sealed class RestoreEngine
             if (e.ManagedCore || request.RequireCompleteMigration)
             {
                 var pathMappings = RestorePlanner.BuildPathMappings(package.Manifest,request.Mappings);
+                adaptationNotes.AddRange(await RestorePlanner.PrepareStructuralFilesAsync(e.Stage,rootMap[e.RootId],e.RestoredFiles,package,pathMappings,ct));
                 if(e.ManagedCore) using (DirectoryLease.Acquire(e.Stage))
                     adaptationNotes.AddRange(await new CoreRestoreAdapter().PrepareAsync(e.Stage, rootMap[e.RootId].OriginalPath, pathMappings, ct));
-                await RestorePlanner.PrepareStructuralFilesAsync(e.Stage,rootMap[e.RootId],e.RestoredFiles,package,pathMappings,ct);
                 var stagedRoot = new BackupRoot { Id = e.RootId, OriginalPath = e.Stage, IsDirectory = e.IsDirectory, Kind = SourceKind.Custom };
                 e.RestoredFiles = BackupEngine.Snapshot([stagedRoot], null, ct);
                 foreach (var file in e.RestoredFiles.Where(f => !f.IsDirectory)) file.Sha256 = await FileIO.HashAsync(BackupEngine.SourcePath(stagedRoot, file), ct);

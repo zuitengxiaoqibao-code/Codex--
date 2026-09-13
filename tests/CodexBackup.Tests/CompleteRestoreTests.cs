@@ -74,6 +74,25 @@ public class CompleteRestoreTests
         await new CoreRestoreAdapter().PrepareAsync(Path.Combine(t.Root,"stage"),"C:/old/core",new Dictionary<string,string>{{"C:/old","D:/new"}});
         var result=File.ReadAllText(Path.Combine(t.Root,"stage/.codex-global-state.json"));Assert.Contains("D:/new/p",result);Assert.DoesNotContain("other-command",result);Assert.Contains("projectId",result);
     }
+
+    [Fact]
+    public async Task SupportedConfigPathsRelinkAcrossManagedRestoreLayout()
+    {
+        using var t = new TestTree();
+        var stage = t.Dir("stage");
+        var config = t.Write("stage/config.toml", "codex_home = 'C:\\\\old\\\\core'\nmodel_instructions_file = 'C:\\\\old\\\\instructions.md'\n[agents.researcher]\nconfig_file = 'C:\\\\old\\\\agents\\\\researcher.toml'\n[otel.exporter.tls]\nca_certificate = 'C:\\\\old\\\\certs\\\\ca.pem'\n");
+        var root = new BackupRoot { Id = "r", OriginalPath = "C:\\old\\core", Kind = SourceKind.Core, IsDirectory = true };
+        var package = new VerifiedPackage("E:\\package", new BackupManifest { Roots = [root] }, []);
+        var files = new[] { new FileRecord { RootId = root.Id, RelativePath = "config.toml" } };
+
+        await RestorePlanner.PrepareStructuralFilesAsync(stage, root, files, package, new Dictionary<string, string> { ["C:\\old"] = "D:\\new" }, CancellationToken.None);
+
+        var rewritten = File.ReadAllText(config);
+        Assert.Contains("codex_home = 'D:\\\\new\\\\core'", rewritten);
+        Assert.Contains("model_instructions_file = 'D:\\\\new\\\\instructions.md'", rewritten);
+        Assert.Contains("config_file = 'D:\\\\new\\\\agents\\\\researcher.toml'", rewritten);
+        Assert.Contains("ca_certificate = 'D:\\\\new\\\\certs\\\\ca.pem'", rewritten);
+    }
     [Fact] public void RelocatedLayoutKeepsDriveHierarchyAndCurrentCoreHome()
     {
         var manifest=new BackupManifest{Roots=[new(){Id="a",OriginalPath="D:\\projects\\a",Kind=SourceKind.Project},new(){Id="b",OriginalPath="D:\\projects\\b",Kind=SourceKind.Project},new(){Id="c",OriginalPath="C:\\old-core",Kind=SourceKind.Core}]};

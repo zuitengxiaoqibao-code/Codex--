@@ -1,5 +1,6 @@
 using System.Text;
 using System.Text.Json.Nodes;
+using System.Text.RegularExpressions;
 
 namespace CodexBackup.Core;
 
@@ -134,18 +135,23 @@ public static class RestorePlanner
             throw new BackupException("恢复后的会话正文、项目目录或关联来源缺失，不能报告完整迁移。");
         }
     }
-    internal static async Task PrepareStructuralFilesAsync(string stage,BackupRoot root,IReadOnlyList<FileRecord> files,VerifiedPackage package,IReadOnlyDictionary<string,string> mappings,CancellationToken ct)
+    internal static async Task<List<string>> PrepareStructuralFilesAsync(string stage,BackupRoot root,IReadOnlyList<FileRecord> files,VerifiedPackage package,IReadOnlyDictionary<string,string> mappings,CancellationToken ct)
     {
-        foreach(var record in files.Where(f=>!f.IsDirectory))
+        var notes = new List<string>();
+        for (var index = 0; index < files.Count; index++)
         {
+            var record = files[index];
+            if (record.IsDirectory) continue;
             ct.ThrowIfCancellationRequested();
             var relative=record.RelativePath.Replace('/','\\');
             var oldFile=relative.Length==0?Normalize(root.OriginalPath):Path.Combine(Normalize(root.OriginalPath),relative);
             var name=Path.GetFileName(oldFile);
-            var isGit=name==".git" || ((name=="commondir" || name=="gitdir") && oldFile.Contains("\\.git\\",StringComparison.OrdinalIgnoreCase));
-            if(!isGit)continue;
             var path=relative.Length==0?stage:PathSafety.Under(stage,relative);
             if(!File.Exists(path))continue;
+            var isGit=name==".git" || ((name=="commondir" || name=="gitdir") && oldFile.Contains("\\.git\\",StringComparison.OrdinalIgnoreCase));
+            if (IsConfigFileName(name, oldFile))
+                notes.AddRange(await RewriteConfigPathsAsync(path, mappings, ct));
+            if(!isGit)continue;
             PathSafety.RejectReparseAncestors(path);
             if(new FileInfo(path).Length>32768)throw new BackupException("Git 关联文件超过安全上限。");
             var content=await File.ReadAllTextAsync(path,Encoding.UTF8,ct);var value=content.Trim();
@@ -163,7 +169,142 @@ public static class RestorePlanner
             var file=resolved.Record.RelativePath.Length==0?stage:PathSafety.Under(stage,resolved.Record.RelativePath);
             await RewriteSessionMetaAsync(file,mappings,ct);
         }
+        return notes.Distinct(StringComparer.Ordinal).ToList();
     }
+
+    private static bool IsConfigFileName(string name, string fullPath) =>
+        name.Equals("config.toml", StringComparison.OrdinalIgnoreCase) ||
+        name.Equals("requirements.toml", StringComparison.OrdinalIgnoreCase) ||
+        name.Equals("managed_config.toml", StringComparison.OrdinalIgnoreCase) ||
+        name.EndsWith(".config.toml", StringComparison.OrdinalIgnoreCase) ||
+        (name.EndsWith(".toml", StringComparison.OrdinalIgnoreCase) && fullPath.Contains("\\agents\\", StringComparison.OrdinalIgnoreCase));
+
+    internal static async Task<List<string>> RewriteConfigPathsAsync(string path, IReadOnlyDictionary<string,string> mappings, CancellationToken ct)
+    {
+        PathSafety.RejectReparseAncestors(path);
+        var info = new FileInfo(path);
+        if (info.Length > 4 * 1024 * 1024) throw new BackupException("配置文件超出安全重写上限。");
+        var text = await File.ReadAllTextAsync(path, new UTF8Encoding(false, true), ct);
+        var lines = text.Split('\n');
+        var output = new StringBuilder(text.Length);
+        var section = "";
+        var marketplaceLocal = false;
+        var activeKey = "";
+        var arrayDepth = 0;
+        var changed = false;
+        var stale = new List<string>();
+        for (var lineIndex = 0; lineIndex < lines.Length; lineIndex++)
+        {
+            ct.ThrowIfCancellationRequested();
+            var originalLine = lines[lineIndex];
+            var line = originalLine;
+            var sectionMatch = Regex.Match(line, "^\\s*\\[\\[?\\s*(?<section>[^\\]]+?)\\s*\\]\\]?\\s*$");
+            if (sectionMatch.Success)
+            {
+                section = Regex.Replace(sectionMatch.Groups["section"].Value, "\\s+", "").ToLowerInvariant();
+                marketplaceLocal = false;
+                activeKey = "";
+                arrayDepth = 0;
+                var projectHeader = Regex.Match(line, "^(?<before>\\s*\\[\\s*projects\\s*\\.\\s*)(?<q>['\"])(?<value>.*?)(?:\\k<q>)(?<after>\\s*\\]\\s*)$");
+                if (projectHeader.Success && TryMapAbsolute(projectHeader.Groups["value"].Value, mappings, out var mappedHeader))
+                {
+                    line = projectHeader.Groups["before"].Value + projectHeader.Groups["q"].Value + EncodeTomlValue(mappedHeader, projectHeader.Groups["q"].Value[0]) + projectHeader.Groups["q"].Value + projectHeader.Groups["after"].Value;
+                    changed = true;
+                }
+                else if (projectHeader.Success) AddStale(projectHeader.Groups["value"].Value, stale);
+            }
+
+            var assignment = Regex.Match(line, "^\\s*(?<key>[a-zA-Z][a-zA-Z0-9_-]*(?:\\s*\\.\\s*[a-zA-Z][a-zA-Z0-9_-]*)*)\\s*=\\s*(?<value>.*)$");
+            if (assignment.Success)
+            {
+                activeKey = assignment.Groups["key"].Value.Replace(" ", "", StringComparison.Ordinal).Replace('-', '_').ToLowerInvariant();
+                arrayDepth = BracketDelta(assignment.Groups["value"].Value);
+                if (activeKey.EndsWith("source_type", StringComparison.Ordinal) && assignment.Groups["value"].Value.Contains("local", StringComparison.OrdinalIgnoreCase))
+                    marketplaceLocal = true;
+            }
+
+            var effectiveKey = activeKey.Split('.').LastOrDefault() ?? "";
+            var pathKey = effectiveKey is "codex_home" or "data_dir" or "data_root" or "codex_dir" or "sqlite_home" or "log_dir" or
+                "model_instructions_file" or "model_catalog_json" or "experimental_compact_prompt_file" or "js_repl_node_path" or "js_repl_node_module_dirs" or
+                "sessions_dir" or "session_dir" or "sessions_root" or "session_root" or "project_path" or "project_root" or "workspace" or "workspace_path" or
+                "workspace_root" or "cwd" or "config_file" or "ca_certificate" or "client_certificate" or "client_private_key" or "managed_dir" or "windows_managed_dir" ||
+                (effectiveKey == "path" && (section.StartsWith("skills", StringComparison.OrdinalIgnoreCase) || section.StartsWith("plugins", StringComparison.OrdinalIgnoreCase))) ||
+                (effectiveKey is "source" or "source_path" or "directory" or "manifest" && section.StartsWith("marketplaces.", StringComparison.OrdinalIgnoreCase) && marketplaceLocal);
+            if (pathKey && !LooksLikeRemoteValue(line))
+            {
+                var rewritten = RewriteQuotedValues(line, mappings, stale);
+                line = rewritten.Text;
+                changed |= rewritten.Changed;
+                arrayDepth = Math.Max(0, arrayDepth + (assignment.Success ? 0 : BracketDelta(line)));
+                if (arrayDepth == 0 && assignment.Success && !line.Contains('[', StringComparison.Ordinal)) activeKey = "";
+            }
+            else if (arrayDepth > 0)
+            {
+                var rewritten = RewriteQuotedValues(line, mappings, stale);
+                line = rewritten.Text;
+                changed |= rewritten.Changed;
+                arrayDepth = Math.Max(0, arrayDepth + BracketDelta(line));
+            }
+            output.Append(line);
+            if (lineIndex < lines.Length - 1) output.Append('\n');
+        }
+        if (!changed) return stale.Distinct(StringComparer.OrdinalIgnoreCase).Select(x => $"配置中的绝对路径未能重连，恢复后需人工修改：{x}（文件：{path}）").ToList();
+        var temp = path + ".relocate-" + Guid.NewGuid().ToString("N");
+        try
+        {
+            await File.WriteAllTextAsync(temp, output.ToString(), new UTF8Encoding(false), ct);
+            File.Move(temp, path, true);
+        }
+        finally { if (File.Exists(temp)) File.Delete(temp); }
+        return stale.Distinct(StringComparer.OrdinalIgnoreCase).Select(x => $"配置中的绝对路径未能重连，恢复后需人工修改：{x}（文件：{path}）").ToList();
+    }
+
+    private static (string Text, bool Changed) RewriteQuotedValues(string line, IReadOnlyDictionary<string,string> mappings, List<string> stale)
+    {
+        var changed = false;
+        var text = Regex.Replace(line, "(?<q>['\"])(?<value>.*?)(?:\\k<q>)", match =>
+        {
+            if (!TryMapAbsolute(match.Groups["value"].Value, mappings, out var mapped)) { AddStale(match.Groups["value"].Value, stale); return match.Value; }
+            changed = true;
+            var quote = match.Groups["q"].Value[0];
+            return quote + EncodeTomlValue(mapped, quote) + quote;
+        });
+        return (text, changed);
+    }
+
+    private static void AddStale(string value, List<string> stale)
+    {
+        if (stale.Count >= 500) return;
+        try
+        {
+            var unescaped = value.Replace("\\\\", "\\").Replace("\\\"", "\"").Replace("\\'", "'");
+            if (Path.IsPathFullyQualified(unescaped) && !unescaped.StartsWith("\\\\", StringComparison.Ordinal) && !unescaped.StartsWith("//", StringComparison.Ordinal))
+                stale.Add(Normalize(unescaped));
+        }
+        catch (BackupException) { }
+        catch (ArgumentException) { }
+    }
+
+    private static bool TryMapAbsolute(string value, IReadOnlyDictionary<string,string> mappings, out string mapped)
+    {
+        mapped = value;
+        try
+        {
+            var unescaped = value.Replace("\\\\", "\\").Replace("\\\"", "\"").Replace("\\'", "'");
+            if (!Path.IsPathFullyQualified(unescaped) || unescaped.StartsWith("\\\\", StringComparison.Ordinal) || unescaped.StartsWith("//", StringComparison.Ordinal)) return false;
+            var normalized = Normalize(unescaped);
+            var replacement = Map(normalized, mappings);
+            if (replacement.Equals(normalized, StringComparison.OrdinalIgnoreCase)) return false;
+            mapped = replacement;
+            return true;
+        }
+        catch (BackupException) { return false; }
+        catch (ArgumentException) { return false; }
+    }
+
+    private static string EncodeTomlValue(string value, char quote) => quote == '"' ? value.Replace("\\", "\\\\").Replace("\"", "\\\"") : value.Replace("\\", "\\\\");
+    private static int BracketDelta(string value) => value.Count(c => c == '[') - value.Count(c => c == ']');
+    private static bool LooksLikeRemoteValue(string line) => Regex.IsMatch(line, "(?i)(https?://|git@[^\\s'\\\"]+:)");
     internal static async Task RewriteSessionMetaAsync(string path,IReadOnlyDictionary<string,string> mappings,CancellationToken ct)
     {
         PathSafety.RejectReparseAncestors(path);

@@ -640,5 +640,76 @@ public class DiscoveryTests
         Assert.Contains(result.EnvironmentManifest.Entries, entry => entry.DisplayName == "requirements.toml" && entry.SourcePath == Path.GetFullPath(requirements));
     }
 
+    [Fact]
+    public async Task OfficialAgentAndOtelCertificatePathsAreDiscovered()
+    {
+        using var t = new TestTree();
+        var profile = t.Dir("profile");
+        t.Dir("profile/.codex");
+        var agent = t.Write("profile/.codex/agents/researcher.toml", "model = 'gpt-test'\n");
+        var ca = t.Write("profile/.codex/certs/ca.pem", "ca\n");
+        var client = t.Write("profile/.codex/certs/client.pem", "client\n");
+        var key = t.Write("profile/.codex/certs/client.key", "key\n");
+        t.Write("profile/.codex/config.toml", "[agents.researcher]\nconfig_file = 'agents/researcher.toml'\n[otel.exporter.tls]\nca_certificate = 'certs/ca.pem'\nclient_certificate = 'certs/client.pem'\nclient_private_key = 'certs/client.key'\n");
+
+        var result = await new DiscoveryService().ScanAsync(profile);
+
+        foreach (var expected in new[] { agent, ca, client, key })
+            Assert.Contains(result.Items, x => x.Kind == SourceKind.Environment && x.Path == Path.GetFullPath(expected) && x.Required);
+    }
+
+    [Fact]
+    public async Task LocalMarketplaceSingleSegmentSourceIsResolvedRelativeToConfig()
+    {
+        using var t = new TestTree();
+        var profile = t.Dir("profile");
+        var marketplace = t.Dir("profile/.codex/marketplace");
+        t.Write("profile/.codex/config.toml", "[marketplaces.local]\nsource_type = 'local'\nsource = 'marketplace'\n");
+
+        var result = await new DiscoveryService().ScanAsync(profile);
+
+        Assert.Contains(result.Items, x => x.Kind == SourceKind.Plugin && x.Path == Path.GetFullPath(marketplace) && x.Required);
+    }
+
+    [Fact]
+    public async Task DeepProjectConfigTraversalReportsBoundaryInsteadOfSilentlyStopping()
+    {
+        using var t = new TestTree();
+        var profile = t.Dir("profile");
+        t.Dir("profile/.codex");
+        var relative = "deep";
+        for (var i = 0; i < 40; i++) relative = Path.Combine(relative, "level" + i);
+        var project = t.Dir(relative);
+        var ancestor = Path.Combine("deep", "level0");
+        var instructions = t.Write(Path.Combine(ancestor, "instructions.md"), "instructions\n");
+        t.Dir(Path.Combine(ancestor, ".codex"));
+        t.Write(Path.Combine(ancestor, ".codex", "config.toml"), "model_instructions_file = '" + instructions.Replace("\\", "\\\\") + "'\n");
+        t.Write("profile/.codex/projects.json", "{\"projects\":[{\"rootPaths\":[\"" + Json(project) + "\"]}]}\n");
+
+        var result = await new DiscoveryService().ScanAsync(profile);
+
+        Assert.Contains(result.Findings, x => x.Code == "project-config-depth-limit");
+        Assert.DoesNotContain(result.Items, x => x.Kind == SourceKind.Environment && x.Path == Path.GetFullPath(instructions));
+    }
+
+    [Fact]
+    public async Task ScanCancellationIsPropagatedFromJsonMetadataTraversal()
+    {
+        using var t = new TestTree();
+        var profile = t.Dir("profile");
+        t.Dir("profile/.codex");
+        var projects = string.Join(",", Enumerable.Range(0, 2000).Select(i => "{\"rootPaths\":[\"" + Json(t.Dir("projects/p" + i)) + "\"]}"));
+        t.Write("profile/.codex/projects.json", "{\"projects\":[" + projects + "]}");
+        using var cancellation = new CancellationTokenSource();
+        var progress = new InlineProgress(_ => cancellation.Cancel());
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => new DiscoveryService().ScanAsync(profile, progress: progress, cancellationToken: cancellation.Token));
+    }
+
+    private sealed class InlineProgress(Action<OperationProgress> action) : IProgress<OperationProgress>
+    {
+        public void Report(OperationProgress value) => action(value);
+    }
+
     private static string Json(string value) => value.Replace("\\", "\\\\");
 }

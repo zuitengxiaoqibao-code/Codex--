@@ -1,4 +1,4 @@
-# Codex Backup (Windows 0.3.2 preview)
+# Codex Backup (Windows 0.3.3 preview)
 
 Offline .NET 10 / WPF backup, restore and verification tool with a Chinese UI. It follows the configured `CODEX_HOME`, session references and project paths across local drives; it does not assume that Codex lives on `C:`.
 
@@ -39,8 +39,8 @@ System-level files are backed up when readable but are never written directly to
 Release checks:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\verify-release.ps1 -ReleaseDirectory C:\path\to\outputs\v0.3.2
-powershell -ExecutionPolicy Bypass -File .\scripts\sign-release.ps1 -ReleaseDirectory C:\path\to\outputs\v0.3.2
+powershell -ExecutionPolicy Bypass -File .\scripts\verify-release.ps1 -ReleaseDirectory C:\path\to\outputs\v0.3.3
+powershell -ExecutionPolicy Bypass -File .\scripts\sign-release.ps1 -ReleaseDirectory C:\path\to\outputs\v0.3.3
 ```
 
 ## Safety and acceptance

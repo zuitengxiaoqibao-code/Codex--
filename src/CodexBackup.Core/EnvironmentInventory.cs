@@ -30,14 +30,14 @@ public static class EnvironmentInventory
         "config.toml", "requirements.toml"
     ];
 
-    public static EnvironmentManifest Collect(string profile, IReadOnlyList<SourceItem> items, CancellationToken cancellationToken = default)
+    public static EnvironmentManifest Collect(string profile, IReadOnlyList<SourceItem> items, CancellationToken cancellationToken = default, bool includeHostEnvironment = true, IReadOnlyList<Finding>? findings = null)
     {
         var manifest = new EnvironmentManifest();
         Add(manifest, "运行环境", ".NET 运行时", Environment.Version.ToString(), "信息");
         Add(manifest, "运行环境", "操作系统", Environment.OSVersion.VersionString, "信息");
         Add(manifest, "运行环境", "进程架构", Environment.Is64BitProcess ? "x64" : "x86", "信息");
 
-        foreach (var variable in ReadVariables(cancellationToken))
+        foreach (var variable in ReadVariables(cancellationToken, includeHostEnvironment))
         {
             cancellationToken.ThrowIfCancellationRequested();
             var sensitive = IsSensitiveName(variable.Key);
@@ -56,6 +56,24 @@ public static class EnvironmentInventory
             }
             var git = Path.Combine(root, ".git");
             if (Directory.Exists(git) || File.Exists(git)) Add(manifest, "Git", ".git", "项目包含 Git 关联，恢复时按路径映射检查", git, "重要", "随对应来源选择");
+        }
+
+        // Surface every discovered Codex source in the report so users can verify that
+        // history, runtime databases, skills and plugins are covered alongside config files.
+        foreach (var item in items.Where(x => x.Exists && x.Kind is SourceKind.Core or SourceKind.Session or SourceKind.Memory or SourceKind.Skill or SourceKind.Plugin or SourceKind.Environment))
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var category = item.Kind switch
+            {
+                SourceKind.Core => "Codex 核心数据",
+                SourceKind.Session => "会话与转录",
+                SourceKind.Memory => "记忆库",
+                SourceKind.Skill => "技能",
+                SourceKind.Plugin => "插件与市场",
+                _ => "Codex 外围状态"
+            };
+            var coverage = item.Required ? "已纳入备份" : "随对应来源选择";
+            Add(manifest, category, item.Name, string.IsNullOrWhiteSpace(item.Reason) ? "已发现；请按来源选择并在恢复后复核" : item.Reason, item.Path, item.Required ? "重要" : "信息", coverage);
         }
 
         foreach (var config in items.Where(x => x.Exists && !x.IsDirectory && x.Kind == SourceKind.Environment &&
@@ -82,6 +100,8 @@ public static class EnvironmentInventory
         Add(manifest, "端口", "本机监听端口", "未自动读取或恢复；请根据项目清单人工核对", null, "需核查", "需在新系统重建");
         Add(manifest, "文件关联", "Windows 文件关联", "未自动修改；新系统需按项目需要重新注册", null, "需核查", "需在新系统重建");
         Add(manifest, "Codex 配置层", "云端或组织受管配置", "官方配置可能由云端、MDM 或域策略提供；本工具不会下载、复制或自动启用它", null, "需核查", "外部来源，未复制");
+        foreach (var finding in findings?.Where(x => x.Code == "remote-marketplace-rebuild") ?? [])
+            Add(manifest, "插件与市场", "远程 marketplace", finding.Message, null, "需核查", "需在新系统重建");
         return manifest;
     }
 
@@ -96,10 +116,13 @@ public static class EnvironmentInventory
         return manifest;
     }
 
-    private static IEnumerable<KeyValuePair<string, string?>> ReadVariables(CancellationToken cancellationToken)
+    private static IEnumerable<KeyValuePair<string, string?>> ReadVariables(CancellationToken cancellationToken, bool includeHostEnvironment)
     {
         var values = new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
-        foreach (var scope in new[] { EnvironmentVariableTarget.Process, EnvironmentVariableTarget.User, EnvironmentVariableTarget.Machine })
+        var scopes = includeHostEnvironment
+            ? new[] { EnvironmentVariableTarget.Process, EnvironmentVariableTarget.User, EnvironmentVariableTarget.Machine }
+            : new[] { EnvironmentVariableTarget.Machine };
+        foreach (var scope in scopes)
         {
             cancellationToken.ThrowIfCancellationRequested();
             try

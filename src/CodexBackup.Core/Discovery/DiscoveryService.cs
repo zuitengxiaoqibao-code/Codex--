@@ -45,7 +45,13 @@ public sealed class DiscoveryService
         }
 
         var defaultCorePath = Normalize(Path.Combine(selectedProfile, ".codex"));
-        foreach (var root in roots.DistinctBy(x => Normalize(x.Path), Paths))
+        var normalizedRoots = new List<(string Path, string Evidence)>();
+        foreach (var root in roots)
+        {
+            try { normalizedRoots.Add((Normalize(root.Path), root.Evidence)); }
+            catch (Exception ex) { findings.Add(new(FindingLevel.Warning, "configured-core-invalid", $"配置的 Codex 数据目录无法识别（{ex.GetType().Name}）；已跳过该位置，请改成明确的本地磁盘路径。", root.Path)); }
+        }
+        foreach (var root in normalizedRoots.DistinctBy(x => x.Path, Paths))
             ScanCoreRoot(root.Path, root.Evidence, cancellationToken, !root.Evidence.Equals("用户默认目录", StringComparison.Ordinal));
         foreach (var root in additionalRoots ?? []) ScanAdditionalRoot(root, cancellationToken);
         FinalizeCoreRequirement(defaultCorePath);
@@ -57,12 +63,21 @@ public sealed class DiscoveryService
                 var sqliteHome = Environment.GetEnvironmentVariable("CODEX_SQLITE_HOME", scope);
                 if (!string.IsNullOrWhiteSpace(sqliteHome)) ScanSqliteLocation(sqliteHome, $"{scope} 级 CODEX_SQLITE_HOME 环境变量", cancellationToken, true);
             }
-            ScanSystemConfigLocations(cancellationToken);
         }
+        else
+        {
+            var machineSqliteHome = Environment.GetEnvironmentVariable("CODEX_SQLITE_HOME", EnvironmentVariableTarget.Machine);
+            if (!string.IsNullOrWhiteSpace(machineSqliteHome)) ScanSqliteLocation(machineSqliteHome, "系统级 CODEX_SQLITE_HOME 环境变量", cancellationToken, true);
+        }
+        // ProgramData is machine-wide and applies even when the scan targets another user profile.
+        ScanSystemConfigLocations(cancellationToken);
 
         ScanProfileLocations(selectedProfile, cancellationToken);
         if (includeProcessEnvironment)
-            ScanProjectConfig(Environment.CurrentDirectory, defaultCorePath, cancellationToken);
+        {
+            var activeCorePath = items.FirstOrDefault(x => x.Kind == SourceKind.Core && x.Exists)?.Path ?? defaultCorePath;
+            ScanProjectConfig(Environment.CurrentDirectory, activeCorePath, cancellationToken);
+        }
         if (includeProcessEnvironment)
         {
             var installedPackages = WindowsEnvironment.GetInstalledCodexMsixPackages(cancellationToken, out var packageWarning);
@@ -78,7 +93,7 @@ public sealed class DiscoveryService
             if (Directory.Exists(location) || File.Exists(location)) result.InstallationPaths.Add(location);
         }
         result.InstallationPaths.AddRange(packageInstallations.Where(x => !result.InstallationPaths.Contains(x, Paths)));
-        result.CodexVersion = packageVersions.FirstOrDefault() ?? DiscoverVersion(roots.Select(x => Normalize(x.Path)));
+        result.CodexVersion = packageVersions.FirstOrDefault() ?? DiscoverVersion(scannedCoreRoots);
         if (result.CodexVersion == "未知") findings.Add(new(FindingLevel.Info, "codex-version-unknown", "未能从已知版本文件确认 Codex 版本；不会执行未知程序来探测。"));
         foreach (var missing in items.Where(x => !x.Exists && !x.Required))
             findings.Add(new(FindingLevel.Info, "known-location-missing", "此用户没有该可选位置，默认不选择。", missing.Path));
@@ -89,7 +104,7 @@ public sealed class DiscoveryService
         result.Items = [.. items];
         result.Findings = [.. findings];
         result.Sessions = [.. sessions];
-        result.EnvironmentManifest = EnvironmentInventory.Collect(selectedProfile, result.Items, cancellationToken);
+        result.EnvironmentManifest = EnvironmentInventory.Collect(selectedProfile, result.Items, cancellationToken, includeProcessEnvironment, result.Findings);
         progress?.Report(new("检测", $"发现 {items.Count} 项来源"));
         return Task.FromResult(result);
         }
@@ -154,7 +169,10 @@ public sealed class DiscoveryService
             var dotGit = Path.Combine(current, ".git");
             if (Directory.Exists(dotGit) || File.Exists(dotGit))
             {
-                var project = Add(Path.GetFileName(current), current, SourceKind.Project, false, "用户附加目录中发现的 Git 项目"); AddGitDependencies(project); discoveries++; continue;
+                var project = Add(Path.GetFileName(current), current, SourceKind.Project, false, "用户附加目录中发现的 Git 项目");
+                AddGitDependencies(project);
+                ScanProjectConfig(current, scannedCoreRoots.FirstOrDefault() ?? Path.Combine(selectedProfile, ".codex"), token);
+                discoveries++; continue;
             }
             try
             {
@@ -283,9 +301,21 @@ public sealed class DiscoveryService
             catch (OperationCanceledException) { throw; }
             catch (Exception ex) { findings.Add(new(FindingLevel.Warning, "msix-scan-incomplete", $"商店应用包检测不完整（MSIX，{ex.GetType().Name}）。", packages)); }
         }
-        Add("普通任务工作文件", Path.Combine(profile, "Documents", "Codex"), SourceKind.Project, false, "Codex 普通任务默认位置");
+        var ordinary = Add("普通任务工作文件", Path.Combine(profile, "Documents", "Codex"), SourceKind.Project, false, "Codex 普通任务默认位置");
+        if (ordinary.Exists && ordinary.IsDirectory)
+        {
+            AddGitDependencies(ordinary);
+            ScanProjectConfig(ordinary.Path, items.FirstOrDefault(x => x.Kind == SourceKind.Core && x.Exists)?.Path ?? Path.Combine(profile, ".codex"), token);
+        }
         if (Paths.Equals(profile, Environment.GetFolderPath(Environment.SpecialFolder.UserProfile)))
-            Add("已重定向的普通任务工作文件", Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), "Codex"), SourceKind.Project, false, "Windows 已知文件夹配置");
+        {
+            var redirected = Add("已重定向的普通任务工作文件", Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), "Codex"), SourceKind.Project, false, "Windows 已知文件夹配置");
+            if (redirected.Exists && redirected.IsDirectory)
+            {
+                AddGitDependencies(redirected);
+                ScanProjectConfig(redirected.Path, items.FirstOrDefault(x => x.Kind == SourceKind.Core && x.Exists)?.Path ?? Path.Combine(profile, ".codex"), token);
+            }
+        }
     }
 
     private void AddChildren(string parent, SourceKind kind, string evidence)
@@ -347,6 +377,7 @@ public sealed class DiscoveryService
             using var document = JsonDocument.Parse(File.ReadAllText(file));
             WalkJson(document.RootElement, null, file, null, token);
         }
+        catch (OperationCanceledException) { throw; }
         catch (Exception ex) { findings.Add(new(FindingLevel.Warning, "metadata-json-unreadable", $"无法解析 JSON 元数据（{ex.GetType().Name}）。", file)); }
     }
 
@@ -465,7 +496,9 @@ public sealed class DiscoveryService
         var files = new List<string> { Path.Combine(current, "config.toml") };
         var hostProfile = Normalize(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile));
         var scanningAnotherProfile = !Paths.Equals(selectedProfile, hostProfile);
-        for (var depth = 0; depth <= 32; depth++)
+        var depth = 0;
+        var reachedDepthLimit = false;
+        for (; depth <= 32; depth++)
         {
             if (scanningAnotherProfile && Paths.Equals(current, hostProfile)) break;
             files.Add(Path.Combine(current, ".codex", "config.toml"));
@@ -473,6 +506,10 @@ public sealed class DiscoveryService
             if (string.IsNullOrWhiteSpace(parent) || Paths.Equals(parent, current)) break;
             current = parent;
         }
+        if (depth > 32)
+            reachedDepthLimit = true;
+        if (reachedDepthLimit)
+            findings.Add(new(FindingLevel.Warning, "project-config-depth-limit", "项目配置向上追踪超过 32 层，深层父目录配置未检测；请把项目根目录或需要的配置目录作为附加位置重新扫描。", current));
         foreach (var file in files.Distinct(Paths))
             if (File.Exists(file)) ScanConfigFile(file, corePath, token);
     }
@@ -490,6 +527,7 @@ public sealed class DiscoveryService
             if (fileName.EndsWith(".config.toml", StringComparison.OrdinalIgnoreCase))
                 Add("Codex 配置档 " + fileName[..^".config.toml".Length], full, SourceKind.Environment, true, "官方用户配置档：CODEX_HOME/<name>.config.toml");
             var sectionName = "";
+            var sectionPath = "";
             void RegisterSkill(string raw, string evidence)
             {
                 if (!LooksLikeLocalPathLiteral(raw)) return;
@@ -497,22 +535,52 @@ public sealed class DiscoveryService
                 var skill = Add("Codex 配置的技能文件", configured, SourceKind.Skill, true, evidence);
                 if (!skill.Exists) findings.Add(new(FindingLevel.Warning, "configured-skill-missing", "配置引用的技能文件不存在或不可访问；恢复后需要重新安装或定位。", configured));
             }
+            void RegisterExternalPath(string raw, string evidence, string description)
+            {
+                if (LooksLikeRemoteSource(raw)) return;
+                var configured = ResolveConfiguredPath(UnescapeConfig(raw), Path.GetDirectoryName(full)!);
+                var external = Add(description, configured, SourceKind.Environment, true, evidence);
+                if (!external.Exists) findings.Add(new(FindingLevel.Warning, "configured-external-path-missing", "Codex 配置引用的外部文件或目录不存在；恢复后需要重新定位。", configured));
+            }
             var toml = ReadTomlStatements(full, 100000);
             if (toml.Truncated) findings.Add(new(FindingLevel.Warning, "config-line-limit", "配置文件行数超过十万，后续内容未检测。", full));
+            var localMarketplaceSections = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var prepassSection = "";
+            foreach (var statement in toml.Statements)
+            {
+                var parsedSection = ExtractSectionPath(statement);
+                if (parsedSection.Length > 0) prepassSection = parsedSection;
+                var sourceType = Regex.Match(statement, "(?is)^\\s*source_type\\s*=\\s*(?<q>['\"])(?<value>.*?)\\k<q>");
+                if (sourceType.Success && prepassSection.StartsWith("marketplaces.", StringComparison.OrdinalIgnoreCase) && sourceType.Groups["value"].Value.Equals("local", StringComparison.OrdinalIgnoreCase))
+                    localMarketplaceSections.Add(prepassSection);
+            }
             foreach (var statement in toml.Statements)
             {
                 token.ThrowIfCancellationRequested();
                 var section = Regex.Match(statement, "(?i)^\\s*\\[\\s*projects\\s*\\.\\s*(?<q>['\"])(?<path>.*?)\\k<q>\\s*\\]\\s*$");
                 if (section.Success)
                 {
-                    try { AddReferencedProject(ResolveConfiguredPath(UnescapeConfig(section.Groups["path"].Value), Path.GetDirectoryName(full)!), $"TOML 项目节：{full}", null, token); }
+                    try { AddReferencedProject(ResolveConfiguredPath(UnescapeConfig(section.Groups["path"].Value), Path.GetDirectoryName(full)!), $"TOML 项目节：{full}", null, token, corePath); }
                     catch (Exception ex) { findings.Add(new(FindingLevel.Warning, "project-path-invalid", $"项目路径格式无效，无法纳入检测（{ex.GetType().Name}）。", full)); }
                     continue;
+                }
+                foreach (Match external in Regex.Matches(statement, "(?is)(?<key>config_file|ca_certificate|client_certificate|client_private_key|managed_dir|windows_managed_dir)\\s*=\\s*(?<q>['\"])(?<path>.*?)\\k<q>"))
+                {
+                    var externalKey = external.Groups["key"].Value.ToLowerInvariant();
+                    var isAgent = externalKey == "config_file" && (sectionPath.StartsWith("agents.", StringComparison.OrdinalIgnoreCase) || statement.Contains("agents", StringComparison.OrdinalIgnoreCase));
+                    var isOtel = externalKey is "ca_certificate" or "client_certificate" or "client_private_key" && (sectionPath.StartsWith("otel", StringComparison.OrdinalIgnoreCase) || statement.Contains("otel", StringComparison.OrdinalIgnoreCase));
+                    var isHook = externalKey is "managed_dir" or "windows_managed_dir" && (sectionPath.StartsWith("hooks", StringComparison.OrdinalIgnoreCase) || statement.Contains("hooks", StringComparison.OrdinalIgnoreCase));
+                    if (isAgent || isOtel || isHook)
+                    {
+                        try { RegisterExternalPath(external.Groups["path"].Value, $"Codex 配置路径引用：{full}", "Codex 配置引用的外部文件"); }
+                        catch (Exception ex) { findings.Add(new(FindingLevel.Warning, "config-path-invalid", $"配置中的路径无法解析（{ex.GetType().Name}）。", full)); }
+                    }
                 }
                 var namedSection = Regex.Match(statement, "(?i)^\\s*\\[\\[?\\s*(?<name>[a-z][a-z0-9_-]*)(?:\\s*\\.\\s*(?<q>['\"])(?<path>.*?)\\k<q>)?.*\\]\\]?\\s*$");
                 if (namedSection.Success)
                 {
                     sectionName = namedSection.Groups["name"].Value.ToLowerInvariant();
+                    sectionPath = ExtractSectionPath(statement);
                     if (sectionName == "skills" && namedSection.Groups["path"].Success)
                         try { RegisterSkill(namedSection.Groups["path"].Value, $"Codex 技能配置：{full}"); }
                         catch (Exception ex) { findings.Add(new(FindingLevel.Warning, "configured-skill-invalid", $"技能路径无法解析（{ex.GetType().Name}）。", full)); }
@@ -527,7 +595,8 @@ public sealed class DiscoveryService
                 }
                 var assignment = Regex.Match(statement, "(?is)^\\s*(?<key>[a-z][a-z0-9_-]*(?:\\s*\\.\\s*[a-z][a-z0-9_-]*)*)\\s*[=:]\\s*(?<value>.+?)\\s*$");
                 if (!assignment.Success) continue;
-                var key = assignment.Groups["key"].Value.Split('.').Last().Trim().Replace('-', '_').ToLowerInvariant();
+                var keyPath = assignment.Groups["key"].Value.Replace(" ", "", StringComparison.Ordinal).Replace('-', '_').ToLowerInvariant();
+                var key = keyPath.Split('.').Last();
                 var kind = key switch
                 {
                     "codex_home" or "data_dir" or "data_root" or "codex_dir" => "core",
@@ -537,16 +606,30 @@ public sealed class DiscoveryService
                     "sessions_dir" or "session_dir" or "sessions_root" or "session_root" => "session",
                     "project_path" or "project_root" or "workspace" or "workspace_path" or "workspace_root" or "cwd" => "project",
                     "path" when sectionName == "skills" => "skill",
+                    "config_file" when sectionPath.StartsWith("agents.", StringComparison.OrdinalIgnoreCase) || keyPath.StartsWith("agents.", StringComparison.OrdinalIgnoreCase) => "environment",
+                    "ca_certificate" or "client_certificate" or "client_private_key" when sectionPath.StartsWith("otel", StringComparison.OrdinalIgnoreCase) || keyPath.StartsWith("otel.", StringComparison.OrdinalIgnoreCase) => "environment",
+                    "managed_dir" or "windows_managed_dir" when sectionPath.StartsWith("hooks", StringComparison.OrdinalIgnoreCase) || keyPath.StartsWith("hooks.", StringComparison.OrdinalIgnoreCase) => "environment",
                     "source" or "source_path" or "path" or "directory" or "config_file" or "manifest" when sectionName is "plugins" or "marketplaces" => "plugin",
                     _ => ""
                 };
                 if (kind.Length == 0) continue;
                 foreach (Match quoted in Regex.Matches(assignment.Groups["value"].Value, "(?s)(?<q>['\"])(?<path>.*?)\\k<q>"))
                 {
-                    if (kind == "plugin" && !LooksLikeLocalPathLiteral(quoted.Groups["path"].Value)) continue;
+                    var rawPath = quoted.Groups["path"].Value;
+                    var localMarketplace = sectionPath.StartsWith("marketplaces.", StringComparison.OrdinalIgnoreCase) && localMarketplaceSections.Contains(sectionPath);
+                    if (kind == "plugin" && LooksLikeRemoteSource(rawPath))
+                    {
+                        findings.Add(new(FindingLevel.Info, "remote-marketplace-rebuild", "此 marketplace 使用远程来源；仅保存配置中的来源名称，恢复后需要联网并重新添加，远程内容和凭据不会写入备份。", full));
+                        continue;
+                    }
+                    if (kind == "plugin" && !LooksLikeLocalPathLiteral(rawPath) && !localMarketplace) {
+                        if (key == "source" && sectionPath.StartsWith("marketplaces.", StringComparison.OrdinalIgnoreCase))
+                            findings.Add(new(FindingLevel.Info, "remote-marketplace-rebuild", "此 marketplace 使用远程来源；仅保存配置中的来源名称，恢复后需要联网并重新添加，远程内容和凭据不会写入备份。", full));
+                        continue;
+                    }
                     try
                     {
-                        var configured = ResolveConfiguredPath(UnescapeConfig(quoted.Groups["path"].Value), Path.GetDirectoryName(full)!);
+                        var configured = ResolveConfiguredPath(UnescapeConfig(rawPath), Path.GetDirectoryName(full)!);
                         if (kind == "core") ScanCoreRoot(configured, $"配置的 Codex 数据目录：{full}", token);
                         else if (kind == "sqlite") ScanSqliteLocation(configured, $"配置的 SQLite 状态目录：{full}", token, true);
                         else if (kind == "log")
@@ -559,19 +642,19 @@ public sealed class DiscoveryService
                             var external = Add("Codex 配置引用的外部文件", configured, SourceKind.Environment, true, $"配置路径引用：{full}");
                             if (!external.Exists) findings.Add(new(FindingLevel.Warning, "configured-external-path-missing", "Codex 配置引用的外部文件或目录不存在；恢复后需要重新定位。", configured));
                         }
-                        else if (kind == "plugin" && LooksLikeLocalPathLiteral(quoted.Groups["path"].Value))
+                        else if (kind == "plugin" && (LooksLikeLocalPathLiteral(rawPath) || localMarketplace))
                         {
                             var external = Add("Codex 插件或市场本地目录", configured, SourceKind.Plugin, true, $"插件/市场路径配置：{full}");
                             if (!external.Exists) findings.Add(new(FindingLevel.Warning, "configured-plugin-path-missing", "配置引用的插件或市场目录不存在或不可访问；恢复后需要重新安装或定位。", configured));
                         }
-                        else if (kind == "skill") RegisterSkill(quoted.Groups["path"].Value, $"Codex 技能配置：{full}");
+                        else if (kind == "skill") RegisterSkill(rawPath, $"Codex 技能配置：{full}");
                         else if (kind == "session")
                         {
                             var source = Add("配置的会话目录", configured, SourceKind.Session, true, $"配置文件：{full}");
                             if (!source.Exists) findings.Add(new(FindingLevel.Blocker, "configured-session-missing", "配置的会话目录不存在或不可访问。", configured));
                             else ScanSessionTree(configured, corePath, token);
                         }
-                        else AddReferencedProject(configured, $"配置文件显式项目引用：{full}", null, token);
+                        else AddReferencedProject(configured, $"配置文件显式项目引用：{full}", null, token, corePath);
                     }
                     catch (Exception ex) { findings.Add(new(FindingLevel.Warning, "config-path-invalid", $"配置中的路径无法解析（{ex.GetType().Name}）。", full)); }
                 }
@@ -647,6 +730,21 @@ public sealed class DiscoveryService
             trimmed.EndsWith(".md", StringComparison.OrdinalIgnoreCase) || trimmed.EndsWith(".toml", StringComparison.OrdinalIgnoreCase) || trimmed.EndsWith(".json", StringComparison.OrdinalIgnoreCase);
     }
 
+    private static bool LooksLikeRemoteSource(string value)
+    {
+        var trimmed = value.Trim();
+        if (trimmed.Contains("://", StringComparison.Ordinal)) return true;
+        if (trimmed.StartsWith("git@", StringComparison.OrdinalIgnoreCase)) return true;
+        return Regex.IsMatch(trimmed, @"^[^\\/:\s]+@[^\\/:\s]+:");
+    }
+
+    private static string ExtractSectionPath(string statement)
+    {
+        var match = Regex.Match(statement, "(?is)^\\s*\\[\\[?\\s*(?<path>[^\\]]+?)\\s*\\]\\]?\\s*$");
+        if (!match.Success) return "";
+        return Regex.Replace(match.Groups["path"].Value, "\\s+", "").ToLowerInvariant();
+    }
+
     private void ScanSessionTree(string root, string corePath, CancellationToken token)
     {
         if (!Directory.Exists(root)) return;
@@ -715,7 +813,7 @@ public sealed class DiscoveryService
         string project = "";
         if (!string.IsNullOrWhiteSpace(projectPath))
         {
-            try { project = ResolveConfiguredPath(projectPath, corePath); AddReferencedProject(project, evidence, activity, token); }
+            try { project = ResolveConfiguredPath(projectPath, corePath); AddReferencedProject(project, evidence, activity, token, corePath); }
             catch (Exception ex) { findings.Add(new(FindingLevel.Warning, "session-project-invalid", $"会话引用的项目路径无效（{ex.GetType().Name}）。", projectPath)); }
         }
         var normalizedCore = Normalize(corePath);
@@ -745,19 +843,43 @@ public sealed class DiscoveryService
     private string ResolveConfiguredPath(string value, string baseDirectory)
     {
         var path = UnescapeConfig(value.Trim());
-        // TOML literal strings keep backslashes; the bounded compatibility unescape above can
-        // collapse the two leading slashes of a Windows extended path prefix.
+        // Preserve Windows extended and UNC prefixes before checking whether the value is rooted.
         if (path.StartsWith(@"\?\", StringComparison.Ordinal)) path = @"\" + path;
         if (path == "~") path = selectedProfile;
         else if (path.StartsWith("~/", StringComparison.Ordinal) || path.StartsWith("~\\", StringComparison.Ordinal)) path = Path.Combine(selectedProfile, path[2..]);
-        path = Environment.ExpandEnvironmentVariables(path);
-        if (!Path.IsPathFullyQualified(path)) path = Path.Combine(baseDirectory, path);
+        var hostProfile = Normalize(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile));
+        if (Paths.Equals(selectedProfile, hostProfile))
+            path = Environment.ExpandEnvironmentVariables(path);
+        else
+        {
+            path = path.Replace("%USERPROFILE%", selectedProfile, StringComparison.OrdinalIgnoreCase)
+                .Replace("%HOME%", selectedProfile, StringComparison.OrdinalIgnoreCase)
+                .Replace("%APPDATA%", Path.Combine(selectedProfile, "AppData", "Roaming"), StringComparison.OrdinalIgnoreCase)
+                .Replace("%LOCALAPPDATA%", Path.Combine(selectedProfile, "AppData", "Local"), StringComparison.OrdinalIgnoreCase)
+                .Replace("%CODEX_HOME%", Path.Combine(selectedProfile, ".codex"), StringComparison.OrdinalIgnoreCase);
+            if (path.Contains('%', StringComparison.Ordinal))
+                throw new BackupException("自定义用户配置包含无法验证的环境变量；为避免读到宿主用户文件，已要求先改成明确的本地路径。");
+        }
+        if (!Path.IsPathFullyQualified(path))
+        {
+            if (Path.IsPathRooted(path) || path.StartsWith("/", StringComparison.Ordinal) || path.StartsWith("\\", StringComparison.Ordinal))
+                throw new BackupException("配置引用了网络、设备或 POSIX 根路径；请先把内容导出到本地磁盘，再重新扫描。");
+            path = Path.Combine(baseDirectory, path);
+        }
         return Normalize(path);
     }
 
-    private static string UnescapeConfig(string value) => value.Replace("\\\\", "\\").Replace("\\\"", "\"").Replace("\\'", "'");
+    private static string UnescapeConfig(string value)
+    {
+        // A TOML literal UNC/device path must keep its leading slashes. Basic strings still
+        // receive the bounded compatibility unescape used by older config files.
+        if (value.StartsWith(@"\\", StringComparison.Ordinal) && !value.StartsWith(@"\\\\?\", StringComparison.Ordinal)) return value;
+        var unescaped = value.Replace("\\\\", "\\").Replace("\\\"", "\"").Replace("\\'", "'");
+        if (unescaped.StartsWith(@"\?\", StringComparison.Ordinal)) return @"\" + unescaped;
+        return unescaped;
+    }
 
-    private void AddReferencedProject(string? path, string evidence, DateTimeOffset? activity = null, CancellationToken token = default)
+    private void AddReferencedProject(string? path, string evidence, DateTimeOffset? activity = null, CancellationToken token = default, string? associatedCorePath = null)
     {
         if (string.IsNullOrWhiteSpace(path) || !Path.IsPathFullyQualified(path)) return;
         SourceItem item;
@@ -768,7 +890,7 @@ public sealed class DiscoveryService
         if (item.Exists && item.IsDirectory)
         {
             AddGitDependencies(item);
-            ScanProjectConfig(item.Path, items.FirstOrDefault(x => x.Kind == SourceKind.Core && x.Exists)?.Path ?? Path.Combine(selectedProfile, ".codex"), token);
+            ScanProjectConfig(item.Path, associatedCorePath ?? items.FirstOrDefault(x => x.Kind == SourceKind.Core && x.Exists)?.Path ?? Path.Combine(selectedProfile, ".codex"), token);
         }
     }
 
