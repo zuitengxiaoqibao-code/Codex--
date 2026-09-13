@@ -745,6 +745,9 @@ public sealed class DiscoveryService
     private string ResolveConfiguredPath(string value, string baseDirectory)
     {
         var path = UnescapeConfig(value.Trim());
+        // TOML literal strings keep backslashes; the bounded compatibility unescape above can
+        // collapse the two leading slashes of a Windows extended path prefix.
+        if (path.StartsWith(@"\?\", StringComparison.Ordinal)) path = @"\" + path;
         if (path == "~") path = selectedProfile;
         else if (path.StartsWith("~/", StringComparison.Ordinal) || path.StartsWith("~\\", StringComparison.Ordinal)) path = Path.Combine(selectedProfile, path[2..]);
         path = Environment.ExpandEnvironmentVariables(path);

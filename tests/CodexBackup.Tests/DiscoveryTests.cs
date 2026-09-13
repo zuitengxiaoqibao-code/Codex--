@@ -506,7 +506,8 @@ public class DiscoveryTests
         t.Dir("profile/.codex");
         var skill = t.Write("external/skills/custom/SKILL.md", "# skill");
         var marketplace = t.Dir("external/marketplace");
-        t.Write("profile/.codex/config.toml", "[skills]\n[skills.'" + skill.Replace("\\", "\\\\") + "']\nenabled = true\n[marketplaces.local]\nsource = '" + marketplace.Replace("\\", "\\\\") + "'\n[marketplaces.remote]\nsource = 'https://example.invalid/marketplace'\n");
+        var extendedMarketplace = @"\\?\" + marketplace;
+        t.Write("profile/.codex/config.toml", "[skills]\n[skills.'" + skill.Replace("\\", "\\\\") + "']\nenabled = true\n[marketplaces.local]\nsource = '" + extendedMarketplace.Replace("\\", "\\\\") + "'\n[marketplaces.remote]\nsource = 'https://example.invalid/marketplace'\n");
 
         var result = await new DiscoveryService().ScanAsync(profile);
 
