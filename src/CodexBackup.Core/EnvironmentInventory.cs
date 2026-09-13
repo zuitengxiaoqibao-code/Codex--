@@ -15,6 +15,7 @@ public sealed class EnvironmentEntry
     public string DisplayName { get; set; } = "";
     public string ValueSummary { get; set; } = "未知";
     public string Risk { get; set; } = "信息";
+    public string Coverage { get; set; } = "仅检测到";
     public string? SourcePath { get; set; }
 }
 
@@ -40,7 +41,7 @@ public static class EnvironmentInventory
         {
             cancellationToken.ThrowIfCancellationRequested();
             var sensitive = IsSensitiveName(variable.Key);
-            Add(manifest, "环境变量", variable.Key, sensitive ? "已隐藏敏感值" : string.IsNullOrEmpty(variable.Value) ? "未设置" : "已设置", risk: sensitive ? "敏感" : "信息");
+            Add(manifest, "环境变量", variable.Key, sensitive ? "已隐藏敏感值" : string.IsNullOrEmpty(variable.Value) ? "未设置" : "已设置", risk: sensitive ? "敏感" : "信息", coverage: sensitive ? "仅保存名称" : "仅保存状态");
         }
 
         var roots = items.Where(x => x.Exists && x.IsDirectory && x.Kind is SourceKind.Project or SourceKind.Core)
@@ -51,15 +52,15 @@ public static class EnvironmentInventory
             foreach (var name in LockfileNames)
             {
                 var path = Path.Combine(root, name);
-                if (File.Exists(path)) Add(manifest, "锁定文件", name, "已发现，恢复后可据此重建依赖", path, "信息");
+                if (File.Exists(path)) Add(manifest, "锁定文件", name, "已发现，恢复后可据此重建依赖", path, "信息", "随对应来源选择");
             }
             var git = Path.Combine(root, ".git");
-            if (Directory.Exists(git) || File.Exists(git)) Add(manifest, "Git", ".git", "项目包含 Git 关联，恢复时按路径映射检查", git, "重要");
+            if (Directory.Exists(git) || File.Exists(git)) Add(manifest, "Git", ".git", "项目包含 Git 关联，恢复时按路径映射检查", git, "重要", "随对应来源选择");
         }
 
         foreach (var config in items.Where(x => x.Exists && !x.IsDirectory && x.Kind == SourceKind.Environment &&
-                     Path.GetFileName(x.Path) is "config.toml" or "requirements.toml" or "managed_config.toml"))
-            Add(manifest, "Codex 配置层", Path.GetFileName(config.Path), "已列入备份；新系统需按来源版本和管理员策略重新核对", config.Path, config.Path.EndsWith("requirements.toml", StringComparison.OrdinalIgnoreCase) ? "需核查" : "重要");
+                     (Path.GetFileName(x.Path) is "config.toml" or "requirements.toml" or "managed_config.toml" || Path.GetFileName(x.Path).EndsWith(".config.toml", StringComparison.OrdinalIgnoreCase))))
+            Add(manifest, "Codex 配置层", Path.GetFileName(config.Path), "已列入备份；新系统需按来源版本和管理员策略重新核对", config.Path, config.Path.EndsWith("requirements.toml", StringComparison.OrdinalIgnoreCase) ? "需核查" : "重要", "已纳入备份");
 
         var knownPaths = new[]
         {
@@ -73,14 +74,14 @@ public static class EnvironmentInventory
         foreach (var (category, name, path) in knownPaths)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            if (Directory.Exists(path) || File.Exists(path)) Add(manifest, category, name, "已发现位置；版本和服务需在新系统重新核对", path, "信息");
+            if (Directory.Exists(path) || File.Exists(path)) Add(manifest, category, name, "已发现位置；版本和服务需在新系统重新核对", path, "信息", "仅检测到");
         }
 
-        Add(manifest, "Windows 服务", "系统服务", "未自动读取或恢复；请根据项目清单人工核对", null, "需核查");
-        Add(manifest, "计划任务", "Windows 计划任务", "未自动读取或恢复；请根据项目清单人工核对", null, "需核查");
-        Add(manifest, "端口", "本机监听端口", "未自动读取或恢复；请根据项目清单人工核对", null, "需核查");
-        Add(manifest, "文件关联", "Windows 文件关联", "未自动修改；新系统需按项目需要重新注册", null, "需核查");
-        Add(manifest, "Codex 配置层", "云端或组织受管配置", "官方配置可能由云端、MDM 或域策略提供；本工具不会下载、复制或自动启用它", null, "需核查");
+        Add(manifest, "Windows 服务", "系统服务", "未自动读取或恢复；请根据项目清单人工核对", null, "需核查", "需在新系统重建");
+        Add(manifest, "计划任务", "Windows 计划任务", "未自动读取或恢复；请根据项目清单人工核对", null, "需核查", "需在新系统重建");
+        Add(manifest, "端口", "本机监听端口", "未自动读取或恢复；请根据项目清单人工核对", null, "需核查", "需在新系统重建");
+        Add(manifest, "文件关联", "Windows 文件关联", "未自动修改；新系统需按项目需要重新注册", null, "需核查", "需在新系统重建");
+        Add(manifest, "Codex 配置层", "云端或组织受管配置", "官方配置可能由云端、MDM 或域策略提供；本工具不会下载、复制或自动启用它", null, "需核查", "外部来源，未复制");
         return manifest;
     }
 
@@ -90,7 +91,7 @@ public static class EnvironmentInventory
         foreach (var variable in variables.OrderBy(x => x.Key, StringComparer.OrdinalIgnoreCase))
         {
             var sensitive = IsSensitiveName(variable.Key);
-            Add(manifest, "环境变量", variable.Key, sensitive ? "已隐藏敏感值" : string.IsNullOrEmpty(variable.Value) ? "未设置" : "已设置", risk: sensitive ? "敏感" : "信息");
+            Add(manifest, "环境变量", variable.Key, sensitive ? "已隐藏敏感值" : string.IsNullOrEmpty(variable.Value) ? "未设置" : "已设置", risk: sensitive ? "敏感" : "信息", coverage: sensitive ? "仅保存名称" : "仅保存状态");
         }
         return manifest;
     }
@@ -120,9 +121,9 @@ public static class EnvironmentInventory
         return value.Contains("key") || value.Contains("token") || value.Contains("secret") || value.Contains("password") || value.Contains("passwd") || value.Contains("cookie") || value.Contains("private") || value.Contains("auth");
     }
 
-    private static void Add(EnvironmentManifest manifest, string category, string displayName, string summary, string? sourcePath = null, string risk = "信息")
+    private static void Add(EnvironmentManifest manifest, string category, string displayName, string summary, string? sourcePath = null, string risk = "信息", string coverage = "仅检测到")
     {
         if (manifest.Entries.Any(x => x.Category == category && x.DisplayName.Equals(displayName, StringComparison.OrdinalIgnoreCase) && string.Equals(x.SourcePath, sourcePath, StringComparison.OrdinalIgnoreCase))) return;
-        manifest.Entries.Add(new EnvironmentEntry { Category = category, DisplayName = displayName, ValueSummary = summary, Risk = risk, SourcePath = sourcePath });
+        manifest.Entries.Add(new EnvironmentEntry { Category = category, DisplayName = displayName, ValueSummary = summary, Risk = risk, Coverage = coverage, SourcePath = sourcePath });
     }
 }

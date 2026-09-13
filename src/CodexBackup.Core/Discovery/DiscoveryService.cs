@@ -1,3 +1,4 @@
+using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using System.Xml;
@@ -16,6 +17,7 @@ public sealed class DiscoveryService
     private readonly List<string> packageVersions = [];
     private readonly List<SessionReference> sessions = [];
     private readonly HashSet<string> scannedCoreRoots = new(Paths);
+    private readonly HashSet<string> scannedConfigFiles = new(Paths);
     private string selectedProfile = "";
 
     public Task<ScanResult> ScanAsync(string? profile = null, IProgress<OperationProgress>? progress = null, CancellationToken cancellationToken = default, IReadOnlyList<string>? additionalRoots = null)
@@ -27,7 +29,7 @@ public sealed class DiscoveryService
         selectedProfile = PathSafety.Full(string.IsNullOrWhiteSpace(profile) ? current : profile);
         var includeProcessEnvironment = Paths.Equals(selectedProfile, current);
         var result = new ScanResult { UserProfile = selectedProfile };
-        items.Clear(); findings.Clear(); packageInstallations.Clear(); packageVersions.Clear(); sessions.Clear(); scannedCoreRoots.Clear();
+        items.Clear(); findings.Clear(); packageInstallations.Clear(); packageVersions.Clear(); sessions.Clear(); scannedCoreRoots.Clear(); scannedConfigFiles.Clear();
 
         progress?.Report(new("检测", "正在检查 Codex 数据位置和引用"));
         var roots = new List<(string Path, string Evidence)> { (Path.Combine(selectedProfile, ".codex"), "用户默认目录") };
@@ -59,6 +61,8 @@ public sealed class DiscoveryService
         }
 
         ScanProfileLocations(selectedProfile, cancellationToken);
+        if (includeProcessEnvironment)
+            ScanProjectConfig(Environment.CurrentDirectory, defaultCorePath, cancellationToken);
         if (includeProcessEnvironment)
         {
             var installedPackages = WindowsEnvironment.GetInstalledCodexMsixPackages(cancellationToken, out var packageWarning);
@@ -176,6 +180,13 @@ public sealed class DiscoveryService
         AddChildren(Path.Combine(root, "skills"), SourceKind.Skill, "Codex 技能目录");
         AddChildren(Path.Combine(root, "plugins"), SourceKind.Plugin, "Codex 插件目录");
         AddChildren(Path.Combine(root, "marketplaces"), SourceKind.Plugin, "Codex 插件市场目录");
+        var history = Path.Combine(root, "history.jsonl");
+        if (File.Exists(history)) Add("Codex 历史记录", history, SourceKind.Session, true, "官方固定路径：CODEX_HOME/history.jsonl");
+        foreach (var name in new[] { "state_5.sqlite", "logs_2.sqlite", "goals_1.sqlite", "memories_1.sqlite", "memories_v2_1.sqlite", "queue_1.sqlite", "thread_history_1.sqlite" })
+        {
+            var database = Path.Combine(root, name);
+            if (File.Exists(database)) Add("Codex 运行时数据库 " + name, database, SourceKind.Environment, true, "官方运行时状态数据库");
+        }
         ScanManagedWorktrees(Path.Combine(root, "worktrees"), token);
         foreach (var directory in new[] { "sessions", "archived_sessions", "archived", "custom_sessions", "custom" })
             ScanSessionTree(Path.Combine(root, directory), root, token);
@@ -201,7 +212,7 @@ public sealed class DiscoveryService
         {
             token.ThrowIfCancellationRequested();
             var name = Path.GetFileName(file);
-            if (name.Contains("config", StringComparison.OrdinalIgnoreCase) || name.Contains("project", StringComparison.OrdinalIgnoreCase) || name.Contains("global-state", StringComparison.OrdinalIgnoreCase)) ScanJson(file);
+            if (name.Contains("config", StringComparison.OrdinalIgnoreCase) || name.Contains("project", StringComparison.OrdinalIgnoreCase) || name.Contains("global-state", StringComparison.OrdinalIgnoreCase)) ScanJson(file, token);
         }
         foreach (var file in EnumerateTopFiles(root, ["*.sqlite", "*.db"])) ScanSqlite(file, root, token);
         if (Directory.Exists(Path.Combine(root, "sqlite")))
@@ -328,18 +339,18 @@ public sealed class DiscoveryService
         catch (Exception ex) { findings.Add(new(FindingLevel.Warning, "msix-manifest-unreadable", $"无法读取 MSIX 清单（{ex.GetType().Name}）。", manifest)); }
     }
 
-    private void ScanJson(string file)
+    private void ScanJson(string file, CancellationToken token)
     {
         try
         {
             if (new FileInfo(file).Length > 16 * 1024 * 1024) throw new IOException("元数据超出读取上限");
             using var document = JsonDocument.Parse(File.ReadAllText(file));
-            WalkJson(document.RootElement, null, file, null);
+            WalkJson(document.RootElement, null, file, null, token);
         }
         catch (Exception ex) { findings.Add(new(FindingLevel.Warning, "metadata-json-unreadable", $"无法解析 JSON 元数据（{ex.GetType().Name}）。", file)); }
     }
 
-    private void WalkJson(JsonElement element, string? property, string evidence, DateTimeOffset? inheritedActivity)
+    private void WalkJson(JsonElement element, string? property, string evidence, DateTimeOffset? inheritedActivity, CancellationToken token)
     {
         if (element.ValueKind == JsonValueKind.Object)
         {
@@ -349,12 +360,12 @@ public sealed class DiscoveryService
             foreach (var member in element.EnumerateObject())
             {
                 if (IsPathKeyMap(property) && Path.IsPathFullyQualified(member.Name)) AddReferencedProject(member.Name, evidence, activity);
-                WalkJson(member.Value, IsPathValueMap(property) ? property : member.Name, evidence, activity);
+                WalkJson(member.Value, IsPathValueMap(property) ? property : member.Name, evidence, activity, token);
             }
         }
         else if (element.ValueKind == JsonValueKind.Array)
-            foreach (var child in element.EnumerateArray()) WalkJson(child, property, evidence, inheritedActivity);
-        else if (element.ValueKind == JsonValueKind.String && (IsPathColumn(property) || IsPathValueMap(property))) AddReferencedProject(element.GetString(), evidence, inheritedActivity);
+            foreach (var child in element.EnumerateArray()) WalkJson(child, property, evidence, inheritedActivity, token);
+        else if (element.ValueKind == JsonValueKind.String && (IsPathColumn(property) || IsPathValueMap(property))) AddReferencedProject(element.GetString(), evidence, inheritedActivity, token);
     }
 
     private void ScanSqlite(string file, string corePath, CancellationToken token)
@@ -388,7 +399,7 @@ public sealed class DiscoveryService
                         if (++count > 10000) { findings.Add(new(FindingLevel.Warning, "reference-limit", "引用数量超过一万，后续引用未纳入检测。", file)); break; }
                         DateTimeOffset? activity = null;
                         if (activityColumn is not null && !reader.IsDBNull(1) && TryParseActivity(reader.GetValue(1), out var parsed)) activity = parsed;
-                        AddReferencedProject(reader.GetValue(0)?.ToString(), $"SQLite 元数据 {Path.GetFileName(file)}:{table}.{column}", activity);
+                        AddReferencedProject(reader.GetValue(0)?.ToString(), $"SQLite 元数据 {Path.GetFileName(file)}:{table}.{column}", activity, token);
                     }
                 }
             }
@@ -422,67 +433,218 @@ public sealed class DiscoveryService
             if (!reader.IsDBNull(4) && TryParseActivity(reader.GetValue(4), out var parsed)) timestamp = parsed;
             AddSession(reader.IsDBNull(0) ? "" : reader.GetValue(0)?.ToString(), reader.IsDBNull(1) ? "" : reader.GetValue(1)?.ToString(), corePath,
                 reader.IsDBNull(2) ? null : reader.GetValue(2)?.ToString(), reader.IsDBNull(3) ? null : reader.GetValue(3)?.ToString(), timestamp,
-                $"SQLite 会话元数据：{Path.GetFileName(database)}");
+                $"SQLite 会话元数据：{Path.GetFileName(database)}", token);
         }
     }
 
     private void ScanConfigReferences(string root, string corePath, CancellationToken token)
     {
+        var files = new List<string>();
         foreach (var name in new[] { "config.toml", "requirements.toml", "managed_config.toml", "config.yaml", "config.yml" })
         {
-            var file = Path.Combine(root, name); if (!File.Exists(file)) continue;
-            try
+            var file = Path.Combine(root, name);
+            if (File.Exists(file)) files.Add(file);
+        }
+        try
+        {
+            files.AddRange(Directory.EnumerateFiles(root, "*.config.toml", SearchOption.TopDirectoryOnly));
+        }
+        catch (Exception ex)
+        {
+            findings.Add(new(FindingLevel.Warning, "config-profile-list-incomplete", $"无法列出 Codex 配置档（{ex.GetType().Name}）。", root));
+        }
+        foreach (var file in files.Distinct(Paths)) ScanConfigFile(file, corePath, token);
+    }
+
+    private void ScanProjectConfig(string projectPath, string corePath, CancellationToken token)
+    {
+        string current;
+        try { current = Normalize(projectPath); }
+        catch { return; }
+        if (!Directory.Exists(current)) return;
+        var files = new List<string> { Path.Combine(current, "config.toml") };
+        var hostProfile = Normalize(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile));
+        var scanningAnotherProfile = !Paths.Equals(selectedProfile, hostProfile);
+        for (var depth = 0; depth <= 32; depth++)
+        {
+            if (scanningAnotherProfile && Paths.Equals(current, hostProfile)) break;
+            files.Add(Path.Combine(current, ".codex", "config.toml"));
+            var parent = Directory.GetParent(current)?.FullName;
+            if (string.IsNullOrWhiteSpace(parent) || Paths.Equals(parent, current)) break;
+            current = parent;
+        }
+        foreach (var file in files.Distinct(Paths))
+            if (File.Exists(file)) ScanConfigFile(file, corePath, token);
+    }
+
+    private void ScanConfigFile(string file, string corePath, CancellationToken token)
+    {
+        string full;
+        try { full = Normalize(file); }
+        catch { return; }
+        if (!scannedConfigFiles.Add(full)) return;
+        try
+        {
+            if (new FileInfo(full).Length > 4 * 1024 * 1024) throw new IOException("配置文件超出读取上限");
+            var fileName = Path.GetFileName(full);
+            if (fileName.EndsWith(".config.toml", StringComparison.OrdinalIgnoreCase))
+                Add("Codex 配置档 " + fileName[..^".config.toml".Length], full, SourceKind.Environment, true, "官方用户配置档：CODEX_HOME/<name>.config.toml");
+            var sectionName = "";
+            void RegisterSkill(string raw, string evidence)
             {
-                if (new FileInfo(file).Length > 4 * 1024 * 1024) throw new IOException("配置文件超出读取上限");
-                var lines = 0;
-                foreach (var line in File.ReadLines(file))
+                if (!LooksLikeLocalPathLiteral(raw)) return;
+                var configured = ResolveConfiguredPath(UnescapeConfig(raw), Path.GetDirectoryName(full)!);
+                var skill = Add("Codex 配置的技能文件", configured, SourceKind.Skill, true, evidence);
+                if (!skill.Exists) findings.Add(new(FindingLevel.Warning, "configured-skill-missing", "配置引用的技能文件不存在或不可访问；恢复后需要重新安装或定位。", configured));
+            }
+            var toml = ReadTomlStatements(full, 100000);
+            if (toml.Truncated) findings.Add(new(FindingLevel.Warning, "config-line-limit", "配置文件行数超过十万，后续内容未检测。", full));
+            foreach (var statement in toml.Statements)
+            {
+                token.ThrowIfCancellationRequested();
+                var section = Regex.Match(statement, "(?i)^\\s*\\[\\s*projects\\s*\\.\\s*(?<q>['\"])(?<path>.*?)\\k<q>\\s*\\]\\s*$");
+                if (section.Success)
                 {
-                    token.ThrowIfCancellationRequested();
-                    if (++lines > 100000) { findings.Add(new(FindingLevel.Warning, "config-line-limit", "配置文件行数超过十万，后续内容未检测。", file)); break; }
-                    var section = Regex.Match(line, "(?i)^\\s*\\[\\s*projects\\s*\\.\\s*(?<q>['\"])(?<path>.*?)\\k<q>\\s*\\]\\s*$");
-                    if (section.Success) { AddReferencedProject(ResolveConfiguredPath(UnescapeConfig(section.Groups["path"].Value), Path.GetDirectoryName(file)!), $"TOML 项目节：{file}"); continue; }
-                    var assignment = Regex.Match(line, "(?i)^\\s*(?<key>[a-z][a-z0-9_-]*)\\s*[=:]\\s*(?<value>.+?)\\s*$");
-                    if (!assignment.Success) continue;
-                    var key = assignment.Groups["key"].Value.Replace('-', '_').ToLowerInvariant();
-                    var kind = key switch
+                    try { AddReferencedProject(ResolveConfiguredPath(UnescapeConfig(section.Groups["path"].Value), Path.GetDirectoryName(full)!), $"TOML 项目节：{full}", null, token); }
+                    catch (Exception ex) { findings.Add(new(FindingLevel.Warning, "project-path-invalid", $"项目路径格式无效，无法纳入检测（{ex.GetType().Name}）。", full)); }
+                    continue;
+                }
+                var namedSection = Regex.Match(statement, "(?i)^\\s*\\[\\[?\\s*(?<name>[a-z][a-z0-9_-]*)(?:\\s*\\.\\s*(?<q>['\"])(?<path>.*?)\\k<q>)?.*\\]\\]?\\s*$");
+                if (namedSection.Success)
+                {
+                    sectionName = namedSection.Groups["name"].Value.ToLowerInvariant();
+                    if (sectionName == "skills" && namedSection.Groups["path"].Success)
+                        try { RegisterSkill(namedSection.Groups["path"].Value, $"Codex 技能配置：{full}"); }
+                        catch (Exception ex) { findings.Add(new(FindingLevel.Warning, "configured-skill-invalid", $"技能路径无法解析（{ex.GetType().Name}）。", full)); }
+                    continue;
+                }
+                var quotedKey = Regex.Match(statement, "(?s)^\\s*(?<q>['\"])(?<path>.*?)\\k<q>\\s*=");
+                if (quotedKey.Success && sectionName == "skills")
+                {
+                    try { RegisterSkill(quotedKey.Groups["path"].Value, $"Codex 技能配置：{full}"); }
+                    catch (Exception ex) { findings.Add(new(FindingLevel.Warning, "configured-skill-invalid", $"技能路径无法解析（{ex.GetType().Name}）。", full)); }
+                    continue;
+                }
+                var assignment = Regex.Match(statement, "(?is)^\\s*(?<key>[a-z][a-z0-9_-]*(?:\\s*\\.\\s*[a-z][a-z0-9_-]*)*)\\s*[=:]\\s*(?<value>.+?)\\s*$");
+                if (!assignment.Success) continue;
+                var key = assignment.Groups["key"].Value.Split('.').Last().Trim().Replace('-', '_').ToLowerInvariant();
+                var kind = key switch
+                {
+                    "codex_home" or "data_dir" or "data_root" or "codex_dir" => "core",
+                    "sqlite_home" => "sqlite",
+                    "log_dir" => "log",
+                    "model_instructions_file" or "model_catalog_json" or "experimental_compact_prompt_file" or "js_repl_node_path" or "js_repl_node_module_dirs" => "environment",
+                    "sessions_dir" or "session_dir" or "sessions_root" or "session_root" => "session",
+                    "project_path" or "project_root" or "workspace" or "workspace_path" or "workspace_root" or "cwd" => "project",
+                    "path" when sectionName == "skills" => "skill",
+                    "source" or "source_path" or "path" or "directory" or "config_file" or "manifest" when sectionName is "plugins" or "marketplaces" => "plugin",
+                    _ => ""
+                };
+                if (kind.Length == 0) continue;
+                foreach (Match quoted in Regex.Matches(assignment.Groups["value"].Value, "(?s)(?<q>['\"])(?<path>.*?)\\k<q>"))
+                {
+                    if (kind == "plugin" && !LooksLikeLocalPathLiteral(quoted.Groups["path"].Value)) continue;
+                    try
                     {
-                        "codex_home" or "data_dir" or "data_root" or "codex_dir" => "core",
-                        "sqlite_home" => "sqlite",
-                        "log_dir" => "log",
-                        "model_instructions_file" or "js_repl_node_module_dirs" => "environment",
-                        "sessions_dir" or "session_dir" or "sessions_root" or "session_root" => "session",
-                        "project_path" or "project_root" or "workspace" or "workspace_path" or "workspace_root" or "cwd" => "project",
-                        _ => ""
-                    };
-                    if (kind.Length == 0) continue;
-                    foreach (Match quoted in Regex.Matches(assignment.Groups["value"].Value, "(?<q>['\"])(?<path>.*?)\\k<q>"))
-                    {
-                        var configured = ResolveConfiguredPath(UnescapeConfig(quoted.Groups["path"].Value), Path.GetDirectoryName(file)!);
-                        if (kind == "core") ScanCoreRoot(configured, $"配置的 Codex 数据目录：{file}", token);
-                        else if (kind == "sqlite") ScanSqliteLocation(configured, $"配置的 SQLite 状态目录：{file}", token, true);
+                        var configured = ResolveConfiguredPath(UnescapeConfig(quoted.Groups["path"].Value), Path.GetDirectoryName(full)!);
+                        if (kind == "core") ScanCoreRoot(configured, $"配置的 Codex 数据目录：{full}", token);
+                        else if (kind == "sqlite") ScanSqliteLocation(configured, $"配置的 SQLite 状态目录：{full}", token, true);
                         else if (kind == "log")
                         {
-                            var log = Add("Codex 日志目录", configured, SourceKind.Environment, true, $"配置的日志目录：{file}");
+                            var log = Add("Codex 日志目录", configured, SourceKind.Environment, true, $"配置的日志目录：{full}");
                             if (!log.Exists) findings.Add(new(FindingLevel.Warning, "configured-log-dir-missing", "Codex 配置指定的日志目录不存在；日志无法随本次备份确认。", configured));
                         }
                         else if (kind == "environment")
                         {
-                            var external = Add("Codex 配置引用的外部文件", configured, SourceKind.Environment, true, $"配置路径引用：{file}");
+                            var external = Add("Codex 配置引用的外部文件", configured, SourceKind.Environment, true, $"配置路径引用：{full}");
                             if (!external.Exists) findings.Add(new(FindingLevel.Warning, "configured-external-path-missing", "Codex 配置引用的外部文件或目录不存在；恢复后需要重新定位。", configured));
                         }
+                        else if (kind == "plugin" && LooksLikeLocalPathLiteral(quoted.Groups["path"].Value))
+                        {
+                            var external = Add("Codex 插件或市场本地目录", configured, SourceKind.Plugin, true, $"插件/市场路径配置：{full}");
+                            if (!external.Exists) findings.Add(new(FindingLevel.Warning, "configured-plugin-path-missing", "配置引用的插件或市场目录不存在或不可访问；恢复后需要重新安装或定位。", configured));
+                        }
+                        else if (kind == "skill") RegisterSkill(quoted.Groups["path"].Value, $"Codex 技能配置：{full}");
                         else if (kind == "session")
                         {
-                            var source = Add("配置的会话目录", configured, SourceKind.Session, true, $"配置文件：{file}");
+                            var source = Add("配置的会话目录", configured, SourceKind.Session, true, $"配置文件：{full}");
                             if (!source.Exists) findings.Add(new(FindingLevel.Blocker, "configured-session-missing", "配置的会话目录不存在或不可访问。", configured));
                             else ScanSessionTree(configured, corePath, token);
                         }
-                        else AddReferencedProject(configured, $"配置文件显式项目引用：{file}");
+                        else AddReferencedProject(configured, $"配置文件显式项目引用：{full}", null, token);
                     }
+                    catch (Exception ex) { findings.Add(new(FindingLevel.Warning, "config-path-invalid", $"配置中的路径无法解析（{ex.GetType().Name}）。", full)); }
                 }
             }
-            catch (OperationCanceledException) { throw; }
-            catch (Exception ex) { findings.Add(new(FindingLevel.Warning, "config-coverage-unknown", $"无法读取配置文件中的路径引用（{ex.GetType().Name}）。", file)); }
         }
+        catch (OperationCanceledException) { throw; }
+        catch (Exception ex) { findings.Add(new(FindingLevel.Warning, "config-coverage-unknown", $"无法读取配置文件中的路径引用（{ex.GetType().Name}）。", full)); }
+    }
+
+    private sealed record TomlReadResult(List<string> Statements, bool Truncated);
+
+    private static TomlReadResult ReadTomlStatements(string file, int maxLines)
+    {
+        var statements = new List<string>();
+        var current = new StringBuilder();
+        var depth = 0;
+        var lineCount = 0;
+        var truncated = false;
+        foreach (var raw in File.ReadLines(file))
+        {
+            if (++lineCount > maxLines) { truncated = true; break; }
+            var line = StripTomlComment(raw).Trim();
+            if (line.Length == 0 && current.Length == 0) continue;
+            if (current.Length > 0) current.Append('\n');
+            current.Append(line);
+            depth += TomlBracketDelta(line);
+            if (depth <= 0)
+            {
+                statements.Add(current.ToString());
+                current.Clear();
+                depth = 0;
+            }
+        }
+        if (current.Length > 0) statements.Add(current.ToString());
+        return new(statements, truncated);
+    }
+
+    private static string StripTomlComment(string line)
+    {
+        var quote = '\0';
+        for (var i = 0; i < line.Length; i++)
+        {
+            var c = line[i];
+            if (quote == '"' && c == '\\') { i++; continue; }
+            if ((quote == '\0' || quote == '"') && c == '"') { quote = quote == '\0' ? '"' : '\0'; continue; }
+            if ((quote == '\0' || quote == '\'') && c == '\'') { quote = quote == '\0' ? '\'' : '\0'; continue; }
+            if (quote == '\0' && c == '#') return line[..i];
+        }
+        return line;
+    }
+
+    private static int TomlBracketDelta(string line)
+    {
+        var quote = '\0'; var delta = 0;
+        for (var i = 0; i < line.Length; i++)
+        {
+            var c = line[i];
+            if (quote == '"' && c == '\\') { i++; continue; }
+            if ((quote == '\0' || quote == '"') && c == '"') { quote = quote == '\0' ? '"' : '\0'; continue; }
+            if ((quote == '\0' || quote == '\'') && c == '\'') { quote = quote == '\0' ? '\'' : '\0'; continue; }
+            if (quote != '\0') continue;
+            if (c is '[' or '{') delta++; else if (c is ']' or '}') delta--;
+        }
+        return delta;
+    }
+
+    private static bool LooksLikeLocalPathLiteral(string value)
+    {
+        var trimmed = value.Trim();
+        if (trimmed.Length == 0 || trimmed.Contains("://", StringComparison.Ordinal)) return false;
+        return Path.IsPathFullyQualified(trimmed) || trimmed.StartsWith("./", StringComparison.Ordinal) || trimmed.StartsWith(".\\", StringComparison.Ordinal) ||
+            trimmed.StartsWith("~/", StringComparison.Ordinal) || trimmed.StartsWith("~\\", StringComparison.Ordinal) || trimmed.Contains('/') || trimmed.Contains('\\') ||
+            trimmed.EndsWith(".md", StringComparison.OrdinalIgnoreCase) || trimmed.EndsWith(".toml", StringComparison.OrdinalIgnoreCase) || trimmed.EndsWith(".json", StringComparison.OrdinalIgnoreCase);
     }
 
     private void ScanSessionTree(string root, string corePath, CancellationToken token)
@@ -531,7 +693,7 @@ public sealed class DiscoveryService
                 DateTimeOffset? activity = null;
                 foreach (var name in new[] { "updated_at", "updatedAt", "timestamp", "created_at" })
                     if (meta.TryGetProperty(name, out var value) && TryParseActivity(value, out var parsed)) { activity = parsed; break; }
-                AddSession(Text(meta, "id") ?? Text(meta, "session_id"), Text(meta, "title"), corePath, Text(meta, "cwd"), file, activity, $"会话文件元数据：{file}");
+                AddSession(Text(meta, "id") ?? Text(meta, "session_id"), Text(meta, "title"), corePath, Text(meta, "cwd"), file, activity, $"会话文件元数据：{file}", token);
                 return;
             }
             if (truncated) findings.Add(new(FindingLevel.Warning, "session-metadata-truncated", "会话文件开头超过元数据读取上限，未找到可确认的 session_meta。", file));
@@ -541,7 +703,7 @@ public sealed class DiscoveryService
         catch (Exception ex) { findings.Add(new(FindingLevel.Warning, "session-meta-unreadable", $"无法读取会话元数据（{ex.GetType().Name}）。", file)); }
     }
 
-    private void AddSession(string? id, string? title, string corePath, string? projectPath, string? transcriptPath, DateTimeOffset? activity, string evidence)
+    private void AddSession(string? id, string? title, string corePath, string? projectPath, string? transcriptPath, DateTimeOffset? activity, string evidence, CancellationToken token = default)
     {
         if (string.IsNullOrWhiteSpace(transcriptPath)) { findings.Add(new(FindingLevel.Blocker,"session-transcript-unknown","会话记录没有提供对话文件位置，无法确认备份齐全。",corePath)); return; }
         string transcript;
@@ -553,7 +715,7 @@ public sealed class DiscoveryService
         string project = "";
         if (!string.IsNullOrWhiteSpace(projectPath))
         {
-            try { project = ResolveConfiguredPath(projectPath, corePath); AddReferencedProject(project, evidence, activity); }
+            try { project = ResolveConfiguredPath(projectPath, corePath); AddReferencedProject(project, evidence, activity, token); }
             catch (Exception ex) { findings.Add(new(FindingLevel.Warning, "session-project-invalid", $"会话引用的项目路径无效（{ex.GetType().Name}）。", projectPath)); }
         }
         var normalizedCore = Normalize(corePath);
@@ -592,7 +754,7 @@ public sealed class DiscoveryService
 
     private static string UnescapeConfig(string value) => value.Replace("\\\\", "\\").Replace("\\\"", "\"").Replace("\\'", "'");
 
-    private void AddReferencedProject(string? path, string evidence, DateTimeOffset? activity = null)
+    private void AddReferencedProject(string? path, string evidence, DateTimeOffset? activity = null, CancellationToken token = default)
     {
         if (string.IsNullOrWhiteSpace(path) || !Path.IsPathFullyQualified(path)) return;
         SourceItem item;
@@ -600,7 +762,11 @@ public sealed class DiscoveryService
         catch (Exception ex) { findings.Add(new(FindingLevel.Warning, "project-path-invalid", $"项目路径格式无效，无法纳入检测（{ex.GetType().Name}）。", path)); return; }
         ApplyActivity(item, activity, evidence);
         if (!item.Exists) findings.Add(new(FindingLevel.Warning, "referenced-project-missing", "历史引用的项目路径不存在或不可访问；未覆盖，请定位原文件或保留此遗漏说明。", item.Path));
-        if (item.Exists && item.IsDirectory) AddGitDependencies(item);
+        if (item.Exists && item.IsDirectory)
+        {
+            AddGitDependencies(item);
+            ScanProjectConfig(item.Path, items.FirstOrDefault(x => x.Kind == SourceKind.Core && x.Exists)?.Path ?? Path.Combine(selectedProfile, ".codex"), token);
+        }
     }
 
     private void AddGitDependencies(SourceItem project)

@@ -19,7 +19,7 @@ public class DiscoveryTests
         Assert.Contains("OPENAI_API_KEY", serialized);
         Assert.DoesNotContain("sk-live-secret", serialized);
         Assert.DoesNotContain("D:\\codex", serialized);
-        Assert.Contains(manifest.Entries, x => x.DisplayName == "OPENAI_API_KEY" && x.Risk == "敏感");
+        Assert.Contains(manifest.Entries, x => x.DisplayName == "OPENAI_API_KEY" && x.Risk == "敏感" && x.Coverage == "仅保存名称");
     }
 
     [Fact]
@@ -37,6 +37,20 @@ public class DiscoveryTests
         Assert.Contains(manifest.Entries, x => x.Category == "锁定文件" && x.SourcePath!.EndsWith("package-lock.json", StringComparison.OrdinalIgnoreCase));
         Assert.Contains(manifest.Entries, x => x.Category == "锁定文件" && x.SourcePath!.EndsWith("requirements.txt", StringComparison.OrdinalIgnoreCase));
         Assert.False(File.Exists(Path.Combine(project, "marker.txt")));
+    }
+
+    [Fact]
+    public async Task EnvironmentReportDistinguishesBackedUpProfileConfigFromExternalState()
+    {
+        using var t = new TestTree();
+        var profile = t.Dir("profile");
+        t.Dir("profile/.codex");
+        t.Write("profile/.codex/work.config.toml", "model = 'gpt-test'\n");
+
+        var result = await new DiscoveryService().ScanAsync(profile);
+
+        Assert.Contains(result.EnvironmentManifest.Entries, x => x.Category == "Codex 配置层" && x.DisplayName == "work.config.toml" && x.Coverage == "已纳入备份");
+        Assert.Contains(result.EnvironmentManifest.Entries, x => x.DisplayName == "Windows 计划任务" && x.Coverage == "需在新系统重建");
     }
 
     [Theory]
@@ -413,6 +427,120 @@ public class DiscoveryTests
         Assert.Contains(result.Items, x => x.Kind == SourceKind.Project && x.Path == Path.GetFullPath(project) && !x.Required);
         Assert.DoesNotContain(result.Findings, x => x.Code == "required-codex-root-missing" && x.Path == Path.Combine(profile, ".codex"));
         Assert.DoesNotContain(result.Items, x => x.Path == Path.GetFullPath(search) && x.Required);
+    }
+
+    [Fact]
+    public async Task ProfileConfigAndProjectLocalConfigReferencesAreDiscovered()
+    {
+        using var t = new TestTree();
+        var profile = t.Dir("profile");
+        var core = t.Dir("profile/.codex");
+        var project = t.Dir("repo/demo");
+        var profileInstructions = t.Write("external/profile-instructions.md", "profile");
+        var projectInstructions = t.Write("external/project-instructions.md", "project");
+        t.Write("profile/.codex/config.toml", "profile = 'work'\n");
+        t.Write("profile/.codex/work.config.toml", "model_instructions_file = '" + profileInstructions.Replace("\\", "\\\\") + "'\n");
+        t.Write("repo/demo/.codex/config.toml", "model_instructions_file = '" + projectInstructions.Replace("\\", "\\\\") + "'\n");
+        t.Write("profile/.codex/projects.json", "{\"projects\":[{\"rootPaths\":[\"" + Json(project) + "\"]}]}" );
+
+        var result = await new DiscoveryService().ScanAsync(profile);
+
+        Assert.Contains(result.Items, x => x.Kind == SourceKind.Environment && x.Path == Path.GetFullPath(profileInstructions) && x.Required);
+        Assert.Contains(result.Items, x => x.Kind == SourceKind.Environment && x.Path == Path.GetFullPath(projectInstructions) && x.Required);
+    }
+
+    [Fact]
+    public async Task ConfigPathArraysCanSpanLinesAndRetainEachExternalReference()
+    {
+        using var t = new TestTree();
+        var profile = t.Dir("profile");
+        t.Dir("profile/.codex");
+        var first = t.Write("external/one.md", "one");
+        var second = t.Write("external/two.md", "two");
+        t.Write("profile/.codex/config.toml", "js_repl_node_module_dirs = [\n  '" + first.Replace("\\", "\\\\") + "',\n  '" + second.Replace("\\", "\\\\") + "',\n]\n");
+
+        var result = await new DiscoveryService().ScanAsync(profile);
+
+        Assert.Contains(result.Items, x => x.Kind == SourceKind.Environment && x.Path == Path.GetFullPath(first));
+        Assert.Contains(result.Items, x => x.Kind == SourceKind.Environment && x.Path == Path.GetFullPath(second));
+    }
+
+    [Fact]
+    public async Task ProjectLocalConfigIsFoundThroughParentDirectoryChain()
+    {
+        using var t = new TestTree();
+        var profile = t.Dir("profile");
+        t.Dir("profile/.codex");
+        var project = t.Dir("workspace/team/app");
+        var instructions = t.Write("workspace/team/instructions.md", "instructions");
+        t.Write("workspace/team/.codex/config.toml", "model_instructions_file = '" + instructions.Replace("\\", "\\\\") + "'\n");
+        t.Write("profile/.codex/.codex-global-state.json", "{\"projectSources\":[\"" + Json(project) + "\"]}");
+
+        var result = await new DiscoveryService().ScanAsync(profile);
+
+        Assert.Contains(result.Items, x => x.Kind == SourceKind.Environment && x.Path == Path.GetFullPath(instructions) && x.Required);
+    }
+
+    [Fact]
+    public async Task OfficialHistoryAndRuntimeDatabasesAreListedAsRequiredSources()
+    {
+        using var t = new TestTree();
+        var profile = t.Dir("profile");
+        var core = t.Dir("profile/.codex");
+        t.Write("profile/.codex/history.jsonl", "{}");
+        foreach (var name in new[] { "state_5.sqlite", "logs_2.sqlite", "goals_1.sqlite", "memories_1.sqlite", "memories_v2_1.sqlite", "queue_1.sqlite", "thread_history_1.sqlite" })
+            t.Write("profile/.codex/" + name, "not-a-database");
+
+        var result = await new DiscoveryService().ScanAsync(profile);
+
+        Assert.Contains(result.Items, x => x.Kind == SourceKind.Session && x.Path == Path.GetFullPath(Path.Combine(core, "history.jsonl")) && x.Required);
+        Assert.Contains(result.Items, x => x.Kind == SourceKind.Environment && x.Path == Path.GetFullPath(Path.Combine(core, "state_5.sqlite")) && x.Required);
+        Assert.Contains(result.Items, x => x.Kind == SourceKind.Environment && x.Path == Path.GetFullPath(Path.Combine(core, "memories_v2_1.sqlite")) && x.Required);
+    }
+
+    [Fact]
+    public async Task SkillAndMarketplaceLocalPathReferencesAreDiscoveredWithoutTreatingUrlsAsFiles()
+    {
+        using var t = new TestTree();
+        var profile = t.Dir("profile");
+        t.Dir("profile/.codex");
+        var skill = t.Write("external/skills/custom/SKILL.md", "# skill");
+        var marketplace = t.Dir("external/marketplace");
+        t.Write("profile/.codex/config.toml", "[skills]\n[skills.'" + skill.Replace("\\", "\\\\") + "']\nenabled = true\n[marketplaces.local]\nsource = '" + marketplace.Replace("\\", "\\\\") + "'\n[marketplaces.remote]\nsource = 'https://example.invalid/marketplace'\n");
+
+        var result = await new DiscoveryService().ScanAsync(profile);
+
+        Assert.Contains(result.Items, x => x.Kind == SourceKind.Skill && x.Path == Path.GetFullPath(skill) && x.Required);
+        Assert.Contains(result.Items, x => x.Kind == SourceKind.Plugin && x.Path == Path.GetFullPath(marketplace) && x.Required);
+        Assert.DoesNotContain(result.Items, x => x.Path.Contains("example.invalid", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public async Task OversizedTomlReportsThatTheConfigurationWasNotFullyRead()
+    {
+        using var t = new TestTree();
+        var profile = t.Dir("profile");
+        t.Dir("profile/.codex");
+        var lines = string.Join(Environment.NewLine, Enumerable.Repeat("model = 'gpt-test'", 100001));
+        t.Write("profile/.codex/config.toml", lines);
+
+        var result = await new DiscoveryService().ScanAsync(profile);
+
+        Assert.Contains(result.Findings, x => x.Code == "config-line-limit" && x.Path!.EndsWith("config.toml", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public async Task OfficialSkillsConfigArrayPathIsDiscovered()
+    {
+        using var t = new TestTree();
+        var profile = t.Dir("profile");
+        t.Dir("profile/.codex");
+        var skill = t.Write("external/official/SKILL.md", "# official");
+        t.Write("profile/.codex/config.toml", "[[skills.config]]\npath = '" + skill.Replace("\\", "\\\\") + "'\nenabled = true\n");
+
+        var result = await new DiscoveryService().ScanAsync(profile);
+
+        Assert.Contains(result.Items, x => x.Kind == SourceKind.Skill && x.Path == Path.GetFullPath(skill) && x.Required);
     }
 
     [Fact]
