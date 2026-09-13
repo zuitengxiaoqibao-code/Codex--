@@ -208,7 +208,7 @@ public static class RestorePlanner
                 var projectHeader = Regex.Match(line, "^(?<before>\\s*\\[\\s*projects\\s*\\.\\s*)(?<q>['\"])(?<value>.*?)(?:\\k<q>)(?<after>\\s*\\]\\s*)$");
                 if (projectHeader.Success && TryMapAbsolute(projectHeader.Groups["value"].Value, mappings, out var mappedHeader))
                 {
-                    line = projectHeader.Groups["before"].Value + projectHeader.Groups["q"].Value + EncodeTomlValue(mappedHeader, projectHeader.Groups["q"].Value[0]) + projectHeader.Groups["q"].Value + projectHeader.Groups["after"].Value;
+                    line = projectHeader.Groups["before"].Value + projectHeader.Groups["q"].Value + EncodeTomlValue(mappedHeader, projectHeader.Groups["q"].Value[0], projectHeader.Groups["value"].Value) + projectHeader.Groups["q"].Value + projectHeader.Groups["after"].Value;
                     changed = true;
                 }
                 else if (projectHeader.Success) AddStale(projectHeader.Groups["value"].Value, stale);
@@ -267,7 +267,7 @@ public static class RestorePlanner
             if (!TryMapAbsolute(match.Groups["value"].Value, mappings, out var mapped)) { AddStale(match.Groups["value"].Value, stale); return match.Value; }
             changed = true;
             var quote = match.Groups["q"].Value[0];
-            return quote + EncodeTomlValue(mapped, quote) + quote;
+            return quote + EncodeTomlValue(mapped, quote, match.Groups["value"].Value) + quote;
         });
         return (text, changed);
     }
@@ -302,7 +302,9 @@ public static class RestorePlanner
         catch (ArgumentException) { return false; }
     }
 
-    private static string EncodeTomlValue(string value, char quote) => quote == '"' ? value.Replace("\\", "\\\\").Replace("\"", "\\\"") : value.Replace("\\", "\\\\");
+    private static string EncodeTomlValue(string value, char quote, string? original = null) => quote == '"'
+        ? value.Replace("\\", "\\\\").Replace("\"", "\\\"")
+        : original?.Contains("\\\\", StringComparison.Ordinal) == true ? value.Replace("\\", "\\\\") : value.Replace("'", "''");
     private static int BracketDelta(string value) => value.Count(c => c == '[') - value.Count(c => c == ']');
     private static bool LooksLikeRemoteValue(string line) => Regex.IsMatch(line, "(?i)(https?://|git@[^\\s'\\\"]+:)");
     internal static async Task RewriteSessionMetaAsync(string path,IReadOnlyDictionary<string,string> mappings,CancellationToken ct)
