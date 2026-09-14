@@ -20,7 +20,7 @@ Date: 2026-09-11
 
 - Release build command: `C:\Users\90090\.dotnet\dotnet.exe build src\CodexBackup.App\CodexBackup.App.csproj -c Release`
 - Result after the final code build before this report: succeeded with 0 warnings and 0 errors.
-- Current release target: `0.3.4-preview`; core regression suite: 137 passing tests.
+- Current release target: `0.3.5-preview`; core regression suite: 143 passing tests. The backup view now uses type tabs and includes a verified-backup-gated quarantine cleanup workflow.
 - Smoke command: `src\CodexBackup.App\bin\Release\net10.0-windows\CodexBackup.exe --smoke-test docs\ui-smoke.json`
 - Smoke result: exit code 0; `initialized: true`; `namedControlsValid: true`; no missing controls; screenshot written to `docs/ui-smoke.png`.
 - The screenshot was visually inspected at 1120 x 780. The welcome screen rendered Chinese text, risk list, acknowledgement, navigation action, header, and footer without overlap or clipping.

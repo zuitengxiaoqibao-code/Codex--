@@ -17,7 +17,18 @@ internal static class Diagnostics
             if (mode == "--scan-report")
             {
                 var scan = await new DiscoveryService().ScanAsync();
-                report = new { mode, success = true, scan };
+                var cleanup = CleanupService.FindCandidates(scan.Sessions);
+                var scope = new
+                {
+                    requiredPersonalSources = scan.Items.Count(item => BackupScopePolicy.MustPreserve(item, item.Required)),
+                    defaultSelectedSources = scan.Items.Count(item => BackupScopePolicy.SelectByDefault(item, item.Required)),
+                    reinstallableApplicationSources = scan.Items.Count(item => item.Kind == SourceKind.Application && item.Exists),
+                    reinstallableApplicationRequired = scan.Items.Count(item => item.Kind == SourceKind.Application && BackupScopePolicy.MustPreserve(item, item.Required)),
+                    reinstallableApplicationSelectedByDefault = scan.Items.Count(item => item.Kind == SourceKind.Application && BackupScopePolicy.SelectByDefault(item, item.Required)),
+                    cleanupCandidates = cleanup.Count,
+                    safeCleanupCandidates = cleanup.Count(candidate => candidate.SafeToQuarantine)
+                };
+                report = new { mode, success = true, scan, scope };
             }
             else
             {

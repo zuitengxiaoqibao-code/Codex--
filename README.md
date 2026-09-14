@@ -1,4 +1,4 @@
-# Codex Backup (Windows 0.3.4 preview)
+# Codex Backup (Windows 0.3.5 preview)
 
 Offline .NET 10 / WPF backup, restore and verification tool with a Chinese UI. It follows the configured `CODEX_HOME`, session references and project paths across local drives; it does not assume that Codex lives on `C:`.
 
@@ -26,6 +26,10 @@ Self-test creates random synthetic fixtures beside the report. Its final corrupt
 
 The backup wizard presents three preflight outcomes: `可以重装`, `需要处理后再重装`, and `仅可抢救`. A complete result requires every discovered session to have both its transcript and project directory, and preserves Git pointers and the external memory-vault pointer when they are readable. Unique session IDs, association rows and project locations are shown separately so repeated references are not mistaken for independent conversations.
 
+Backup selection is divided into tabs for sessions, projects, memories, Codex personal data, skills, plugins/tools, reinstallable/other items, and archived-project cleanup. Session/source relationships are indexed once after discovery; a checkbox update changes reference counts and refreshes the UI once, including for bulk selection. Reinstallable Codex/ChatGPT application files, application caches and ordinary logs are not required backup items. Personal session state, source trees, skills, memories, configuration and project Git metadata remain protected.
+
+Archived-project cleanup is opt-in and disabled until the current run has created and verified a backup that contains the candidate. Its bulk action only selects known rebuildable top-level directories such as `bin`, `obj`, `node_modules`, caches and build outputs. An archived project with a Git or build-system marker can be shown as a red source-containing candidate, but it must be selected individually. Transcripts, memory vaults, Codex databases, system roots and user-library roots are never candidates, and projects used by or nested with an active session are locked. Cleanup moves data to a same-volume `.codex-backup-quarantine` directory and writes a journal; the UI can restore that journal without overwriting an existing path.
+
 The restore wizard requires an explicit primary Core when a package contains multiple Core homes. A managed replacement can be blocked when the source and target Codex versions are unknown or differ; isolated extraction remains available. Configuration, credentials, skills, plugins, automations and peripheral tools are retained for review but are never silently enabled. After file verification, the application layer remains pending until a user starts Codex, checks the sidebar and opens representative projects.
 
 Password-protected packages use a chunked authenticated AES-GCM envelope. The password is held only in memory, is never written to `manifest.json` or reports, and cannot be recovered if lost. Keep two copies on different physical media and perform a second verification before deleting the old system.
@@ -39,8 +43,8 @@ System-level files are backed up when readable but are never written directly to
 Release checks:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\verify-release.ps1 -ReleaseDirectory C:\path\to\outputs\v0.3.4
-powershell -ExecutionPolicy Bypass -File .\scripts\sign-release.ps1 -ReleaseDirectory C:\path\to\outputs\v0.3.4
+powershell -ExecutionPolicy Bypass -File .\scripts\verify-release.ps1 -ReleaseDirectory C:\path\to\outputs\v0.3.5
+powershell -ExecutionPolicy Bypass -File .\scripts\sign-release.ps1 -ReleaseDirectory C:\path\to\outputs\v0.3.5
 ```
 
 ## Safety and acceptance

@@ -12,9 +12,9 @@ public sealed class PreflightReport
     public int ProjectLocationCount { get; set; }
     public List<Finding> Findings { get; set; } = [];
 
-    public static PreflightReport Build(ScanResult scan, BackupRequest request)
+    public static PreflightReport Build(ScanResult scan, BackupRequest request, IReadOnlyList<Finding>? evaluatedCoverage = null)
     {
-        var gaps = request.CompleteMigration ? MigrationCoverage.Evaluate(request) : [];
+        var gaps = request.CompleteMigration ? evaluatedCoverage?.ToList() ?? MigrationCoverage.Evaluate(request) : [];
         var status = request.CompleteMigration
             ? gaps.Count == 0 ? PreflightStatus.Ready : PreflightStatus.Blocked
             : PreflightStatus.SalvageOnly;

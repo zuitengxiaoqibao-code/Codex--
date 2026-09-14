@@ -11,7 +11,7 @@ if (-not (Test-Path -LiteralPath $exe -PathType Leaf)) { throw "缺少 CodexBack
 if (-not (Test-Path -LiteralPath $releaseJson -PathType Leaf)) { throw "缺少 RELEASE.json：$releaseJson" }
 
 $metadata = Get-Content -Raw -Encoding UTF8 $releaseJson | ConvertFrom-Json
-if ($metadata.version -ne '0.3.4-preview') { throw "发布版本不是 0.3.4-preview：$($metadata.version)" }
+if ($metadata.version -ne '0.3.5-preview') { throw "发布版本不是 0.3.5-preview：$($metadata.version)" }
 $hashFile = Join-Path $release 'SHA256SUMS.txt'
 $actualHash = (Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash.ToUpperInvariant()
 if (Test-Path -LiteralPath $hashFile) {

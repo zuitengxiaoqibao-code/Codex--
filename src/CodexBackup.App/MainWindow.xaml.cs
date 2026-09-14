@@ -22,18 +22,22 @@ public partial class MainWindow : Window
     private readonly ObservableCollection<SourceItem> sources = [];
     private readonly ObservableCollection<FindingGroup> findingGroups = [];
     private readonly ObservableCollection<SessionGroupRow> sessionRows = [];
+    private readonly ObservableCollection<CleanupCandidate> cleanupCandidates = [];
     private readonly ObservableCollection<MappingRow> mappings = [];
     private readonly ICollectionView sourcesView;
     private readonly ICollectionView sessionView;
+    private readonly ICollectionView cleanupView;
     private CancellationTokenSource? operationCts;
     private ScanResult? scan;
     private VerifiedPackage? verifiedPackage;
     private RestorePreview? restorePreview;
     private string? previewFingerprint;
     private string? resultPath;
+    private string? lastVerifiedBackupPath;
     private readonly List<string> additionalRoots = [];
     private readonly Dictionary<string,string> pathReplacements = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string,bool> baseRequired = [];
+    private SelectionCoordinator? selectionCoordinator;
     private bool syncingSelection;
 
     public MainWindow()
@@ -48,6 +52,8 @@ public partial class MainWindow : Window
         sessionView = CollectionViewSource.GetDefaultView(sessionRows);
         sessionView.Filter = SessionFilter;
         SessionsGrid.ItemsSource = sessionView;
+        cleanupView = CollectionViewSource.GetDefaultView(cleanupCandidates);
+        CleanupGrid.ItemsSource = cleanupView;
         BackupFindingsList.ItemsSource = findingGroups;
         MappingsGrid.ItemsSource = mappings;
         ProfilePathBox.Text = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
@@ -55,6 +61,8 @@ public partial class MainWindow : Window
         SourcesGrid.BeginningEdit += (_, e) => { if (e.Column.DisplayIndex == 0 && e.Row.Item is SourceItem { Required: true }) e.Cancel = true; };
         SourcesGrid.CellEditEnding += SourcesGrid_CellEditEnding;
         SessionsGrid.CellEditEnding += SessionsGrid_CellEditEnding;
+        CleanupGrid.BeginningEdit += (_, e) => { if (e.Column.DisplayIndex == 0 && e.Row.Item is CleanupCandidate { SafeToQuarantine: false }) e.Cancel = true; };
+        CleanupGrid.CellEditEnding += (_, _) => Dispatcher.BeginInvoke(DispatcherPriority.DataBind, new Action(UpdateCleanupSummary));
         MappingsGrid.CellEditEnding += (_, _) => { restorePreview = null; previewFingerprint = null; };
         Closing += Window_Closing;
     }
@@ -88,15 +96,36 @@ public partial class MainWindow : Window
         if (value is not SourceItem item) return false;
         var search = SourceSearchBox?.Text?.Trim() ?? "";
         if (search.Length > 0 && !string.Join(" ", item.Name, item.Path, item.Reason, item.DiscoveredBy).Contains(search, StringComparison.OrdinalIgnoreCase)) return false;
-        return SourceFilterBox?.SelectedIndex switch
+        var statusMatches = SourceFilterBox?.SelectedIndex switch
         {
             1 => item.Required,
-            2 => item.Exists,
-            3 => item.HasProblem,
-            4 => item.Kind is SourceKind.Core or SourceKind.Project or SourceKind.Session or SourceKind.Memory,
-            5 => item.Kind is SourceKind.Environment or SourceKind.Skill or SourceKind.Plugin or SourceKind.Tool or SourceKind.Application,
+            2 => item.Selected,
+            3 => !item.Exists,
+            4 => item.HasProblem,
             _ => true
         };
+        if (!statusMatches) return false;
+        return BackupContentTabs?.SelectedIndex switch
+        {
+            1 => item.Kind == SourceKind.Project,
+            2 => item.Kind == SourceKind.Memory,
+            3 => item.Kind is SourceKind.Core or SourceKind.Session or SourceKind.Environment,
+            4 => item.Kind == SourceKind.Skill,
+            5 => item.Kind is SourceKind.Plugin or SourceKind.Tool,
+            6 => item.Kind is SourceKind.Application or SourceKind.Custom,
+            _ => false
+        };
+    }
+
+    private void BackupContentTabChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (SourceSelectionPanel is null || SessionSelectionPanel is null || CleanupSelectionPanel is null || sourcesView is null) return;
+        var index = BackupContentTabs.SelectedIndex;
+        SessionSelectionPanel.Visibility = index == 0 ? Visibility.Visible : Visibility.Collapsed;
+        CleanupSelectionPanel.Visibility = index == 7 ? Visibility.Visible : Visibility.Collapsed;
+        SourceSelectionPanel.Visibility = index is >= 1 and <= 6 ? Visibility.Visible : Visibility.Collapsed;
+        if (SourceSelectionPanel.Visibility == Visibility.Visible) sourcesView.Refresh();
+        UpdateSourceSummary();
     }
 
     private void SessionFilterChanged(object sender, RoutedEventArgs e)
@@ -132,33 +161,51 @@ public partial class MainWindow : Window
 
     private void SelectVisibleSources_Click(object sender, RoutedEventArgs e) => SetVisibleSources(true);
     private void ClearVisibleSources_Click(object sender, RoutedEventArgs e) => SetVisibleSources(false);
-    private void SelectRequiredSources_Click(object sender, RoutedEventArgs e) => SetSourcesBy(source => source.Required, true);
+    private void SelectRequiredSources_Click(object sender, RoutedEventArgs e)
+    {
+        foreach (var source in sources) source.Selected = source.Required;
+        ReconcileSessionsAfterSourceChange();
+        RefreshSelectionUi();
+    }
     private void SelectProjectSources_Click(object sender, RoutedEventArgs e) => SetSourcesBy(source => source.Kind is SourceKind.Project or SourceKind.Session or SourceKind.Memory, true);
+
+    private void SelectCleanupCandidates_Click(object sender, RoutedEventArgs e)
+    {
+        foreach (var candidate in cleanupCandidates.Where(candidate => candidate.SafeToQuarantine && !candidate.ContainsSource)) candidate.Selected = true;
+        cleanupView.Refresh(); UpdateCleanupSummary();
+    }
+
+    private void ClearCleanupCandidates_Click(object sender, RoutedEventArgs e)
+    {
+        foreach (var candidate in cleanupCandidates) candidate.Selected = false;
+        cleanupView.Refresh(); UpdateCleanupSummary();
+    }
 
     private void SetVisibleSources(bool selected)
     {
         foreach (var source in sourcesView.Cast<object>().OfType<SourceItem>())
             if (selected || !source.Required) source.Selected = selected;
-        sourcesView.Refresh(); SourcesGrid.Items.Refresh(); RefreshCoverage();
+        ReconcileSessionsAfterSourceChange();
+        RefreshSelectionUi();
     }
 
     private void SetSourcesBy(Func<SourceItem, bool> predicate, bool selected)
     {
         foreach (var source in sources.Where(predicate))
             if (selected || !source.Required) source.Selected = selected;
-        sourcesView.Refresh(); SourcesGrid.Items.Refresh(); RefreshCoverage();
+        ReconcileSessionsAfterSourceChange();
+        RefreshSelectionUi();
     }
 
     private void SetVisibleSessions(bool selected)
     {
-        foreach (var row in sessionRows.Where(row => sessionView.Cast<object>().Contains(row))) SetSessionSelection(row, selected);
-        sessionView.Refresh(); UpdateSessionSummary(); RefreshCoverage();
+        var visible = sessionView.Cast<object>().OfType<SessionGroupRow>().ToList();
+        SetSessionSelection(visible, selected);
     }
 
     private void SetSessionsBy(Func<SessionGroupRow, bool> predicate, bool selected)
     {
-        foreach (var row in sessionRows.Where(predicate)) SetSessionSelection(row, selected);
-        sessionView.Refresh(); UpdateSessionSummary(); RefreshCoverage();
+        SetSessionSelection(sessionRows.Where(predicate).ToList(), selected);
     }
 
     private void SessionsGrid_CellEditEnding(object? sender, DataGridCellEditEndingEventArgs e)
@@ -166,8 +213,7 @@ public partial class MainWindow : Window
         if (e.Column.DisplayIndex != 0 || e.Row.Item is not SessionGroupRow row) return;
         Dispatcher.BeginInvoke(DispatcherPriority.DataBind, new Action(() =>
         {
-            SetSessionSelection(row, row.Selected);
-            UpdateSessionSummary(); RefreshCoverage();
+            SetSessionSelection([row], row.Selected);
         }));
     }
 
@@ -179,72 +225,79 @@ public partial class MainWindow : Window
             if (item.Required) item.Selected = true;
             if (!item.Selected)
             {
-                foreach (var row in sessionRows.Where(row => row.Selected && SessionSources(row).Contains(item)))
-                    SetSessionSelection(row, false);
+                var related = selectionCoordinator?.SessionsForSource(item.Id) ?? [];
+                SetSessionSelection(sessionRows.Where(row => row.Selected && related.Contains(row.Id, StringComparer.OrdinalIgnoreCase)).ToList(), false, false);
             }
-            sourcesView.Refresh(); SourcesGrid.Items.Refresh(); UpdateSessionSummary(); RefreshCoverage();
+            RefreshSelectionUi();
         }));
     }
 
-    private void SetSessionSelection(SessionGroupRow row, bool selected)
+    private void SetSessionSelection(IReadOnlyCollection<SessionGroupRow> rows, bool selected, bool refresh = true)
     {
         if (syncingSelection) return;
         syncingSelection = true;
         try
         {
-            row.Selected = selected;
-            foreach (var reference in row.References) reference.Selected = selected;
-            var related = SessionSources(row).ToList();
-            if (selected)
+            foreach (var row in rows)
             {
-                foreach (var source in related) source.Selected = true;
+                row.Selected = selected;
+                foreach (var reference in row.References) reference.Selected = selected;
+                selectionCoordinator?.ApplySessionSelection(row.Id, selected);
             }
-            else
+        }
+        finally { syncingSelection = false; }
+        if (refresh) RefreshSelectionUi();
+    }
+
+    private void RebuildSelectionCoordinator()
+    {
+        selectionCoordinator = SelectionCoordinator.Build(
+            sessionRows.Select(row => new SessionSelectionGroup(row.Id, row.References)),
+            sources,
+            pathReplacements);
+    }
+
+    private void ReconcileSessionsAfterSourceChange()
+    {
+        if (selectionCoordinator is null) return;
+        syncingSelection = true;
+        try
+        {
+            foreach (var row in sessionRows.Where(row => row.Selected).ToList())
             {
-                foreach (var source in related.Where(source => !source.Required && !sessionRows.Where(other => other != row && other.Selected).Any(other => SessionSources(other).Contains(source))))
-                    source.Selected = false;
+                var missing = selectionCoordinator.SourcesForSession(row.Id)
+                    .Select(id => sources.FirstOrDefault(source => source.Id.Equals(id, StringComparison.OrdinalIgnoreCase)))
+                    .Any(source => source is { Selected: false });
+                if (!missing) continue;
+                row.Selected = false;
+                foreach (var reference in row.References) reference.Selected = false;
             }
-            sourcesView.Refresh(); SourcesGrid.Items.Refresh();
+            selectionCoordinator.Reconcile(sessionRows.Where(row => row.Selected).Select(row => row.Id).ToHashSet(StringComparer.OrdinalIgnoreCase));
         }
         finally { syncingSelection = false; }
     }
 
-    private IEnumerable<SourceItem> SessionSources(SessionGroupRow row)
+    private void RefreshSelectionUi()
     {
-        var direct = row.References.SelectMany(reference => sources.Where(source => IsRelated(source, reference))).ToList();
-        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        var queue = new Queue<SourceItem>(direct);
-        while (queue.Count > 0)
-        {
-            var source = queue.Dequeue();
-            if (!seen.Add(source.Id)) continue;
-            yield return source;
-            foreach (var dependency in sources.Where(candidate => source.DependencyIds.Contains(candidate.Id, StringComparer.OrdinalIgnoreCase))) queue.Enqueue(dependency);
-        }
-        foreach (var memory in sources.Where(source => source.Kind == SourceKind.Memory))
-            if (seen.Add(memory.Id)) yield return memory;
-        foreach (var required in sources.Where(source => source.Required))
-            if (seen.Add(required.Id)) yield return required;
+        sourcesView.Refresh();
+        sessionView.Refresh();
+        UpdateSourceSummary();
+        UpdateSessionSummary();
+        UpdateTabHeaders();
+        ScheduleCoverageRefresh();
     }
 
-    private bool IsRelated(SourceItem source, SessionReference reference)
+    private CancellationTokenSource? coverageRefreshCts;
+    private void ScheduleCoverageRefresh()
     {
-        try
+        coverageRefreshCts?.Cancel();
+        var cts = coverageRefreshCts = new();
+        Dispatcher.BeginInvoke(DispatcherPriority.ContextIdle, new Action(() =>
         {
-            var path = MigrationCoverage.Canonical(source.Path);
-            if (source.Kind == SourceKind.Core && !string.IsNullOrWhiteSpace(reference.CorePath) && PathsEqual(path, MigrationCoverage.Resolve(reference.CorePath, pathReplacements))) return true;
-            if (source.Kind == SourceKind.Session && !string.IsNullOrWhiteSpace(reference.TranscriptPath) && PathsEqual(path, MigrationCoverage.Resolve(reference.TranscriptPath, pathReplacements))) return true;
-            if (source.Kind == SourceKind.Project && !string.IsNullOrWhiteSpace(reference.ProjectPath))
-            {
-                var project = MigrationCoverage.Resolve(reference.ProjectPath, pathReplacements);
-                return PathsEqual(path, project) || source.IsDirectory && PathSafety.Contains(path, project);
-            }
-        }
-        catch { }
-        return false;
+            if (cts.IsCancellationRequested || cts != coverageRefreshCts) return;
+            RefreshCoverage();
+        }));
     }
-
-    private static bool PathsEqual(string left, string right) => !string.IsNullOrWhiteSpace(right) && string.Equals(left, MigrationCoverage.Canonical(right), StringComparison.OrdinalIgnoreCase);
 
     private void UpdateSourceSummary()
     {
@@ -259,6 +312,38 @@ public partial class MainWindow : Window
         var visible = sessionView.Cast<object>().OfType<SessionGroupRow>().ToList();
         SessionSummaryText.Text = $"显示 {visible.Count} / {sessionRows.Count} 个独立会话；已选择 {sessionRows.Count(x => x.Selected)} 个；活动 {sessionRows.Count(x => x.IsActive)}，归档 {sessionRows.Count(x => x.IsArchived)}，状态未知 {sessionRows.Count(x => x.HasUnknownLifecycle)}。"
             + (sessionRows.Any(x => x.HasArchivedResidue) ? " 紫色提示表示归档会话仍保留项目文件。" : "");
+    }
+
+    private void UpdateCleanupSummary()
+    {
+        if (CleanupSummaryText is null) return;
+        var safe = cleanupCandidates.Count(candidate => candidate.SafeToQuarantine);
+        var blocked = cleanupCandidates.Count - safe;
+        var selected = cleanupCandidates.Count(candidate => candidate.Selected && candidate.SafeToQuarantine);
+        var ready = cleanupCandidates.Count(candidate => candidate.Selected && candidate.CanQuarantine);
+        var projects = cleanupCandidates.Count(candidate => candidate.ContainsSource);
+        var generated = cleanupCandidates.Count - projects;
+        CleanupSummaryText.Text = $"发现 {projects} 个完整归档项目和 {generated} 个可重建目录；可安排 {safe} 个，活动会话仍在使用 {blocked} 个，已安排 {selected} 个，其中 {ready} 个已随本次备份校验。项目根目录属于红色高风险项，必须逐项选择；会话、Core 数据库和记忆不会成为清理候选。";
+        if (RunCleanupButton is not null) RunCleanupButton.IsEnabled = !string.IsNullOrWhiteSpace(lastVerifiedBackupPath) && ready > 0;
+        UpdateTabHeaders();
+    }
+
+    private void UpdateTabHeaders()
+    {
+        if (SessionsTab is null) return;
+        static string Count(IEnumerable<SourceItem> values)
+        {
+            var list = values.ToList();
+            return $"{list.Count(item => item.Selected)}/{list.Count}";
+        }
+        SessionsTab.Header = $"会话 {sessionRows.Count(row => row.Selected)}/{sessionRows.Count}";
+        ProjectsTab.Header = "项目 " + Count(sources.Where(item => item.Kind == SourceKind.Project));
+        MemoriesTab.Header = "记忆 " + Count(sources.Where(item => item.Kind == SourceKind.Memory));
+        PersonalDataTab.Header = "配置 " + Count(sources.Where(item => item.Kind is SourceKind.Core or SourceKind.Session or SourceKind.Environment));
+        SkillsTab.Header = "技能 " + Count(sources.Where(item => item.Kind == SourceKind.Skill));
+        ToolsTab.Header = "插件工具 " + Count(sources.Where(item => item.Kind is SourceKind.Plugin or SourceKind.Tool));
+        OtherTab.Header = "其他 " + Count(sources.Where(item => item.Kind is SourceKind.Application or SourceKind.Custom));
+        CleanupTab.Header = $"清理 {cleanupCandidates.Count(candidate => candidate.Selected)}/{cleanupCandidates.Count}";
     }
 
     private static string? PickFolder(string title, string? initial = null)
@@ -290,13 +375,20 @@ public partial class MainWindow : Window
         await RunBusyAsync("正在扫描 Codex 数据位置…", async (progress, ct) =>
         {
             scan = await Task.Run(() => discovery.ScanAsync(profile, progress, ct, additionalRoots.ToArray()), ct);
+            var discoveredCleanup = await Task.Run(() => CleanupService.FindCandidates(scan.Sessions, ct), ct);
+            lastVerifiedBackupPath = null;
+            RunCleanupButton.IsEnabled = false;
             sources.Clear(); foreach (var item in scan.Items) sources.Add(item);
             baseRequired.Clear(); foreach (var item in sources) baseRequired[item.Id] = item.Required;
             foreach (var replacement in pathReplacements.Values.Distinct(StringComparer.OrdinalIgnoreCase)) if (Directory.Exists(replacement) || File.Exists(replacement)) AddManual(replacement, Directory.Exists(replacement));
             sessionRows.Clear();
             foreach (var group in SessionGroupRow.Create(scan.Sessions)) sessionRows.Add(group);
+            RebuildSelectionCoordinator();
+            cleanupCandidates.Clear();
+            foreach (var candidate in discoveredCleanup) cleanupCandidates.Add(candidate);
+            UpdateCleanupSummary();
             sessionView.Refresh();
-            ApplyBackupMode(); RefreshCoverage();
+            ApplyBackupMode(true); RefreshCoverage();
         });
     }
 
@@ -317,6 +409,7 @@ public partial class MainWindow : Window
         var full = Path.GetFullPath(path);
         if (sources.Any(x => string.Equals(Path.GetFullPath(x.Path), full, StringComparison.OrdinalIgnoreCase))) return;
         sources.Add(new SourceItem { Name = Path.GetFileName(full), Path = full, Kind = SourceKind.Custom, Selected = true, Exists = true, IsDirectory = directory, Reason = "用户手动加入", DiscoveredBy = "手动选择", LastModifiedUtc = directory ? Directory.GetLastWriteTimeUtc(full) : File.GetLastWriteTimeUtc(full) });
+        RebuildSelectionCoordinator();
         sourcesView.Refresh(); UpdateSourceSummary();
     }
 
@@ -343,20 +436,22 @@ public partial class MainWindow : Window
         EncryptionPasswordBox.Visibility = EncryptionModeBox.SelectedIndex == 1 ? Visibility.Visible : Visibility.Collapsed;
         if (EncryptionModeBox.SelectedIndex != 1) EncryptionPasswordBox.Clear();
     }
-    private void ApplyBackupMode()
+    private void ApplyBackupMode(bool resetOptionalDefaults = false)
     {
-        var complete = BackupModeBox.SelectedIndex == 0;
         foreach (var item in sources)
         {
             var relocated = pathReplacements.ContainsKey(item.Path);
-            item.Required = !relocated && (baseRequired.GetValueOrDefault(item.Id) || complete && item.Exists);
+            item.Required = !relocated && BackupScopePolicy.MustPreserve(item, baseRequired.GetValueOrDefault(item.Id));
             if (relocated) item.Selected = false;
             else if (item.Required) item.Selected = true;
-            item.Reason = relocated ? "原位置已搬走，将从指定的新位置保存，并在恢复时重连路径" : item.Required ? "完整迁移需要此项，避免会话、源码或依赖漏掉" : !item.Exists ? "原文件未找到，请定位新位置；缺失不能算完整" : "自选内容；取消后只保存剩余文件";
+            else if (resetOptionalDefaults) item.Selected = BackupScopePolicy.SelectByDefault(item, baseRequired.GetValueOrDefault(item.Id));
+            item.Reason = relocated ? "原位置已搬走，将从指定的新位置保存，并在恢复时重连路径" : item.Required ? "重装后无法自动重建，必须保存" : !item.Exists ? "原文件未找到；可选项不会阻止迁移" : BackupScopePolicy.Explanation(item);
         }
+        RebuildSelectionCoordinator();
         sourcesView.Refresh(); SourcesGrid.Items.Refresh();
+        UpdateTabHeaders();
     }
-    private BackupRequest CurrentBackupRequest()
+    private BackupRequest CurrentBackupRequest(bool includePreflight = true)
     {
         var request = new BackupRequest
         {
@@ -366,15 +461,16 @@ public partial class MainWindow : Window
             SourceCodexVersion = scan?.CodexVersion ?? "未知", EnvironmentManifest = scan?.EnvironmentManifest ?? new(),
             EncryptionPassword = EncryptionModeBox.SelectedIndex == 1 ? EncryptionPasswordBox.Password : null
         };
-        if (scan is not null) request.Preflight = PreflightReport.Build(scan, request);
+        if (includePreflight && scan is not null) request.Preflight = PreflightReport.Build(scan, request);
         return request;
     }
     private void RefreshCoverage()
     {
         if (scan is null || CoverageSummaryText is null) return;
-        var gaps = MigrationCoverage.Evaluate(CurrentBackupRequest());
+        var request = CurrentBackupRequest(false);
+        var gaps = MigrationCoverage.Evaluate(request);
         var drives = sources.Where(s => s.Exists).Select(s => Path.GetPathRoot(s.Path)).Distinct(StringComparer.OrdinalIgnoreCase);
-        var preflight = PreflightReport.Build(scan, CurrentBackupRequest());
+        var preflight = PreflightReport.Build(scan, request, gaps);
         CoverageSummaryText.Text = $"独立会话 {scan.UniqueSessionCount} 个，已选择 {sessionRows.Count(x => x.Selected)} 个；关联记录 {scan.SessionAssociationCount} 条；项目位置 {scan.ProjectLocationCount} 个。涉及磁盘：{string.Join("、", drives)}。\n" +
             (BackupModeBox.SelectedIndex != 0 ? "当前是自选 / 抢救模式，结果不会标记为完整迁移。" : gaps.Count == 0 ? "本次扫描的会话与项目已选齐。备份时还会按真实文件清单再次核对。" : $"还有 {gaps.Count} 项需要处理，暂不能制作完整迁移包。");
         PreflightStatusText.Text = preflight.Status switch
@@ -425,7 +521,62 @@ public partial class MainWindow : Window
         await RunBusyAsync("正在创建并逐文件校验备份…", async (progress, ct) =>
         {
             var result = await Task.Run(() => backupEngine.BackupAsync(request, progress, ct), ct);
-            ShowResult(result.Manifest.CompleteMigration ? "会话与项目迁移包已创建" : "自选 / 抢救备份已创建（不是完整迁移）", $"文件：{result.Manifest.FileCount:N0}，大小：{FormatBytes(result.Manifest.TotalBytes)}，会话关联：{result.Manifest.Sessions.Count}。文件与关联检查不代替新系统上登录和项目运行验收。", result.PackagePath, result.Manifest.CoverageNotes);
+            lastVerifiedBackupPath = result.PackagePath;
+            foreach (var candidate in cleanupCandidates)
+                candidate.IncludedInVerifiedBackup = result.Manifest.Roots.Any(root => root.IsDirectory && SafeContains(root.OriginalPath, candidate.CandidatePath));
+            cleanupView.Refresh(); UpdateCleanupSummary();
+            RunCleanupButton.IsEnabled = cleanupCandidates.Any(candidate => candidate.Selected && candidate.CanQuarantine);
+            var readyCleanup = cleanupCandidates.Count(candidate => candidate.Selected && candidate.CanQuarantine);
+            var resultNotes = result.Manifest.CoverageNotes.ToList();
+            if (readyCleanup > 0) resultNotes.Insert(0, $"已安排 {readyCleanup} 个归档项目的可重建目录。需要清理时返回“备份”→“清理”页签，再点击“执行已选隔离清理”；程序不会自动永久删除。 ");
+            ShowResult(result.Manifest.CompleteMigration ? "会话与项目迁移包已创建" : "自选 / 抢救备份已创建（不是完整迁移）", $"文件：{result.Manifest.FileCount:N0}，大小：{FormatBytes(result.Manifest.TotalBytes)}，会话关联：{result.Manifest.Sessions.Count}。文件与关联检查不代替新系统上登录和项目运行验收。", result.PackagePath, resultNotes);
+        });
+    }
+
+    private async void RunCleanup_Click(object sender, RoutedEventArgs e)
+    {
+        if (string.IsNullOrWhiteSpace(lastVerifiedBackupPath) || (!Directory.Exists(lastVerifiedBackupPath) && !File.Exists(lastVerifiedBackupPath)))
+        {
+            MessageBox.Show(this, "必须先在本次运行中完成备份并通过校验，才能隔离清理候选。", "尚未完成备份校验", MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
+        }
+        var selected = cleanupCandidates.Where(candidate => candidate.Selected && candidate.CanQuarantine).ToList();
+        if (selected.Count == 0) { MessageBox.Show(this, "尚未选择可隔离的清理候选。", "没有清理项"); return; }
+        if (CleanupConfirmCheck.IsChecked != true)
+        {
+            MessageBox.Show(this, "请先确认这些目录只会移动到同盘隔离区，并记住隔离日志位置。", "需要确认", MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
+        }
+        var details = string.Join("\n", selected.Take(8).Select(candidate => candidate.CandidatePath));
+        if (selected.Count > 8) details += $"\n另有 {selected.Count - 8} 项";
+        if (MessageBox.Show(this, $"将把以下可重建目录移动到同盘 .codex-backup-quarantine 隔离区，不会永久删除：\n\n{details}\n\n确认执行？", "隔离清理确认", MessageBoxButton.OKCancel, MessageBoxImage.Warning) != MessageBoxResult.OK) return;
+        await RunBusyAsync("正在隔离已选构建产物…", async (_, ct) =>
+        {
+            var result = await Task.Run(() => CleanupService.QuarantineAsync(selected, ct), ct);
+            var remaining = await Task.Run(() => CleanupService.FindCandidates(scan!.Sessions, ct), ct);
+            cleanupCandidates.Clear();
+            foreach (var candidate in remaining) cleanupCandidates.Add(candidate);
+            UpdateCleanupSummary();
+            var message = $"已隔离 {result.QuarantinedPaths.Count} 项；失败 {result.FailedPaths.Count} 项。\n隔离日志：{result.JournalPath}";
+            if (result.FailedPaths.Count > 0) message += "\n\n" + string.Join("\n", result.FailedPaths.Take(6));
+            MessageBox.Show(this, message, result.FailedPaths.Count == 0 ? "隔离完成" : "部分隔离完成", MessageBoxButton.OK, result.FailedPaths.Count == 0 ? MessageBoxImage.Information : MessageBoxImage.Warning);
+        });
+    }
+
+    private static bool SafeContains(string parent, string child)
+    {
+        try { return PathSafety.Contains(parent, child); } catch (Exception ex) when (ex is BackupException or ArgumentException) { return false; }
+    }
+
+    private async void RestoreCleanup_Click(object sender, RoutedEventArgs e)
+    {
+        var dialog = new OpenFileDialog { Title = "选择隔离清理日志", Filter = "清理日志 (cleanup-journal.json)|cleanup-journal.json|JSON 日志 (*.json)|*.json", CheckFileExists = true };
+        if (dialog.ShowDialog() != true) return;
+        if (MessageBox.Show(this, "程序只会还原日志中仍在隔离区的目录；若原位置已经存在，将停止且不会覆盖。确认继续？", "还原隔离目录", MessageBoxButton.OKCancel, MessageBoxImage.Information) != MessageBoxResult.OK) return;
+        await RunBusyAsync("正在按隔离日志还原…", async (_, ct) =>
+        {
+            var restored = await Task.Run(() => CleanupService.RestoreAsync(dialog.FileName, ct), ct);
+            MessageBox.Show(this, $"已还原 {restored.Count} 个目录。请重新扫描并检查项目。", "还原完成", MessageBoxButton.OK, MessageBoxImage.Information);
         });
     }
 

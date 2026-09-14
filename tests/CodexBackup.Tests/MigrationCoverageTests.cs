@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using CodexBackup.Core;
 using Xunit;
 
@@ -5,6 +6,64 @@ namespace CodexBackup.Tests;
 
 public class MigrationCoverageTests
 {
+    [Fact]
+    public void SelectionCoordinatorKeepsSharedProjectUntilLastSessionIsCleared()
+    {
+        using var t = new TestTree();
+        t.Write("core/a.jsonl", "a");
+        t.Write("core/b.jsonl", "b");
+        t.Write("project/src.cs", "source");
+        var core = t.Source("core"); core.Kind = SourceKind.Core; core.Required = true;
+        var transcriptA = t.Source("core/a.jsonl"); transcriptA.Kind = SourceKind.Session;
+        var transcriptB = t.Source("core/b.jsonl"); transcriptB.Kind = SourceKind.Session;
+        var project = t.Source("project"); project.Kind = SourceKind.Project; project.Required = false;
+        var groups = new[]
+        {
+            new SessionSelectionGroup("a", [new() { Id = "a", ProjectPath = project.Path, TranscriptPath = transcriptA.Path }]),
+            new SessionSelectionGroup("b", [new() { Id = "b", ProjectPath = project.Path, TranscriptPath = transcriptB.Path }])
+        };
+        var coordinator = SelectionCoordinator.Build(groups, [core, transcriptA, transcriptB, project], new Dictionary<string, string>());
+        var selected = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "a", "b" };
+        coordinator.ApplySessionSelection("a", false, selected);
+
+        Assert.True(project.Selected);
+        coordinator.ApplySessionSelection("b", false, selected);
+        Assert.False(project.Selected);
+    }
+
+    [Fact]
+    public void SelectionCoordinatorBatchUsesStableAssociationsWithoutReevaluatingEverySession()
+    {
+        using var t = new TestTree();
+        var core = t.Source("core"); core.Kind = SourceKind.Core; core.Required = true;
+        var project = t.Source("project"); project.Kind = SourceKind.Project;
+        var groups = Enumerable.Range(0, 1000).Select(i => new SessionSelectionGroup(
+            "session-" + i,
+            [new() { Id = "session-" + i, ProjectPath = project.Path, TranscriptPath = core.Path, Selected = false }])).ToList();
+        var sources = new[] { core, project };
+        var coordinator = SelectionCoordinator.Build(groups, sources, new Dictionary<string, string>());
+        var selected = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var started = Stopwatch.StartNew();
+        foreach (var group in groups) coordinator.ApplySessionSelection(group.Key, true, selected);
+        started.Stop();
+
+        Assert.Equal(1000, selected.Count);
+        Assert.True(project.Selected);
+        Assert.True(started.Elapsed < TimeSpan.FromSeconds(1), $"batch selection took {started.Elapsed}");
+    }
+
+    [Fact]
+    public void BackupScopeRequiresPersonalDataButNotReinstallableApplicationOrLogs()
+    {
+        Assert.True(BackupScopePolicy.MustPreserve(new() { Kind = SourceKind.Memory, Name = "memory" }, true));
+        Assert.True(BackupScopePolicy.MustPreserve(new() { Kind = SourceKind.Skill, Name = "skill" }, true));
+        Assert.True(BackupScopePolicy.MustPreserve(new() { Kind = SourceKind.Environment, Name = "config.toml" }, true));
+        Assert.False(BackupScopePolicy.MustPreserve(new() { Kind = SourceKind.Application, Name = "Codex app" }, true));
+        Assert.False(BackupScopePolicy.MustPreserve(new() { Kind = SourceKind.Environment, Name = "Codex 日志目录" }, true));
+        Assert.False(BackupScopePolicy.SelectByDefault(new() { Kind = SourceKind.Application, Name = "Codex app", Exists = true }, true));
+        Assert.False(BackupScopePolicy.SelectByDefault(new() { Kind = SourceKind.Environment, Name = "Codex 日志目录", Exists = true }, true));
+    }
+
     [Fact] public void ScanCountsSeparateUniqueSessionsAssociationsAndProjectLocations()
     {
         var scan = new ScanResult
@@ -121,5 +180,147 @@ public class MigrationCoverageTests
     {
         var advice=UserGuidance.Explain(new(FindingLevel.Warning,"referenced-project-missing","IOException","D:\\old"));
         Assert.Contains("影响",advice);Assert.Contains("定位已搬走",advice);Assert.DoesNotContain("IOException",advice);
+    }
+}
+
+public sealed class CleanupServiceTests
+{
+    [Fact]
+    public void ArchivedProjectCleanupOnlyListsKnownGeneratedDirectoriesAndLeavesSourceUntouched()
+    {
+        using var t = new TestTree();
+        var project = t.Dir("project");
+        t.Write("project/.git/HEAD", "ref: refs/heads/main");
+        t.Write("project/src/app.cs", "keep");
+        t.Write("project/bin/generated.dll", "generated");
+        t.Write("project/obj/project.assets.json", "generated");
+        t.Write("project/notes.txt", "keep");
+        var session = new SessionReference { Id = "archived", Lifecycle = SessionLifecycle.Archived, ProjectPath = project, TranscriptPath = Path.Combine(t.Root, "transcript.jsonl") };
+        var candidates = CleanupService.FindCandidates([session]);
+
+        Assert.Contains(candidates, c => c.CandidatePath.EndsWith(Path.Combine("project", "bin"), StringComparison.OrdinalIgnoreCase));
+        Assert.Contains(candidates, c => c.CandidatePath.EndsWith(Path.Combine("project", "obj"), StringComparison.OrdinalIgnoreCase));
+        var wholeProject = Assert.Single(candidates, c => c.Kind == CleanupCandidateKind.ArchivedProject);
+        Assert.Equal(project, wholeProject.CandidatePath);
+        Assert.True(wholeProject.ContainsSource);
+        Assert.True(File.Exists(Path.Combine(project, "src", "app.cs")));
+        Assert.All(candidates, c => Assert.False(c.Selected));
+    }
+
+    [Fact]
+    public void WholeArchivedProjectRequiresAProjectIdentityMarker()
+    {
+        using var t = new TestTree();
+        var folder = t.Dir("ordinary-folder");
+        t.Write("ordinary-folder/readme.txt", "data");
+
+        var candidates = CleanupService.FindCandidates([
+            new SessionReference { Id = "archived", Lifecycle = SessionLifecycle.Archived, ProjectPath = folder }
+        ]);
+
+        Assert.DoesNotContain(candidates, candidate => candidate.Kind == CleanupCandidateKind.ArchivedProject);
+    }
+
+    [Fact]
+    public void WholeProjectSharedWithActiveSessionIsLocked()
+    {
+        using var t = new TestTree();
+        var project = t.Dir("project");
+        t.Write("project/package.json", "{}");
+        var candidate = Assert.Single(CleanupService.FindCandidates([
+            new SessionReference { Id = "archived", Lifecycle = SessionLifecycle.Archived, ProjectPath = project },
+            new SessionReference { Id = "active", Lifecycle = SessionLifecycle.Active, ProjectPath = project }
+        ]), item => item.Kind == CleanupCandidateKind.ArchivedProject);
+
+        Assert.True(candidate.ContainsSource);
+        Assert.False(candidate.SafeToQuarantine);
+    }
+
+    [Fact]
+    public void WholeProjectContainingAnActiveSubprojectIsLocked()
+    {
+        using var t = new TestTree();
+        var project = t.Dir("project");
+        t.Write("project/package.json", "{}");
+        var activeSubproject = t.Dir("project/packages/active");
+        t.Write("project/packages/active/package.json", "{}");
+        var candidate = Assert.Single(CleanupService.FindCandidates([
+            new SessionReference { Id = "archived", Lifecycle = SessionLifecycle.Archived, ProjectPath = project },
+            new SessionReference { Id = "active", Lifecycle = SessionLifecycle.Active, ProjectPath = activeSubproject }
+        ]), item => item.Kind == CleanupCandidateKind.ArchivedProject && item.ProjectPath == project);
+
+        Assert.False(candidate.SafeToQuarantine);
+    }
+
+    [Fact]
+    public void CleanupCandidateSharedWithActiveSessionIsNotQuarantinable()
+    {
+        using var t = new TestTree();
+        var project = t.Dir("project");
+        t.Write("project/node_modules/package.json", "generated");
+        var sessions = new[]
+        {
+            new SessionReference { Id = "archived", Lifecycle = SessionLifecycle.Archived, ProjectPath = project },
+            new SessionReference { Id = "active", Lifecycle = SessionLifecycle.Active, ProjectPath = project }
+        };
+
+        var candidate = Assert.Single(CleanupService.FindCandidates(sessions));
+        Assert.True(candidate.IsSharedWithActiveSession);
+        Assert.False(candidate.SafeToQuarantine);
+    }
+
+    [Fact]
+    public async Task QuarantineJournalCanRestoreGeneratedDirectory()
+    {
+        using var t = new TestTree();
+        var project = t.Dir("project");
+        t.Write("project/bin/generated.dll", "generated");
+        var candidate = Assert.Single(CleanupService.FindCandidates([
+            new SessionReference { Id = "archived", Lifecycle = SessionLifecycle.Archived, ProjectPath = project }
+        ]));
+        candidate.Selected = true; candidate.IncludedInVerifiedBackup = true;
+
+        var result = await CleanupService.QuarantineAsync([candidate]);
+        Assert.False(Directory.Exists(candidate.CandidatePath));
+        var restored = await CleanupService.RestoreAsync(result.JournalPath);
+
+        Assert.Single(restored);
+        Assert.True(File.Exists(Path.Combine(project, "bin", "generated.dll")));
+    }
+
+    [Fact]
+    public async Task CleanupRefusesCandidateThatWasNotCoveredByVerifiedBackup()
+    {
+        using var t = new TestTree();
+        var project = t.Dir("project");
+        t.Write("project/bin/generated.dll", "generated");
+        var candidate = Assert.Single(CleanupService.FindCandidates([
+            new SessionReference { Id = "archived", Lifecycle = SessionLifecycle.Archived, ProjectPath = project }
+        ]));
+        candidate.Selected = true;
+
+        var result = await CleanupService.QuarantineAsync([candidate]);
+
+        Assert.Empty(result.QuarantinedPaths);
+        Assert.True(File.Exists(Path.Combine(project, "bin", "generated.dll")));
+    }
+
+    [Fact]
+    public async Task WholeArchivedProjectCanBeQuarantinedAndRestored()
+    {
+        using var t = new TestTree();
+        var project = t.Dir("project");
+        t.Write("project/package.json", "{}");
+        t.Write("project/src/index.js", "source");
+        var candidate = Assert.Single(CleanupService.FindCandidates([
+            new SessionReference { Id = "archived", Lifecycle = SessionLifecycle.Archived, ProjectPath = project }
+        ]), item => item.Kind == CleanupCandidateKind.ArchivedProject);
+        candidate.Selected = true; candidate.IncludedInVerifiedBackup = true;
+
+        var result = await CleanupService.QuarantineAsync([candidate]);
+        Assert.False(Directory.Exists(project));
+        await CleanupService.RestoreAsync(result.JournalPath);
+
+        Assert.True(File.Exists(Path.Combine(project, "src", "index.js")));
     }
 }
