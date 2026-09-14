@@ -499,6 +499,44 @@ public class DiscoveryTests
     }
 
     [Fact]
+    public async Task SessionLifecycleDistinguishesActiveArchivedAndUnknownRoots()
+    {
+        using var t = new TestTree();
+        var profile = t.Dir("profile");
+        var core = t.Dir("profile/.codex");
+        var project = t.Dir("repos/demo");
+        t.Write("profile/.codex/sessions/active.jsonl", "{\"type\":\"session_meta\",\"payload\":{\"id\":\"active\",\"title\":\"当前会话\",\"cwd\":\"" + Json(project) + "\"}}\n");
+        t.Write("profile/.codex/archived_sessions/archived.jsonl", "{\"type\":\"session_meta\",\"payload\":{\"id\":\"archived\",\"title\":\"归档会话\",\"cwd\":\"" + Json(project) + "\"}}\n");
+        var custom = t.Dir("external/custom-sessions");
+        t.Write("external/custom-sessions/unknown.jsonl", "{\"type\":\"session_meta\",\"payload\":{\"id\":\"unknown\",\"title\":\"未知会话\",\"cwd\":\"" + Json(project) + "\"}}\n");
+        t.Write("profile/.codex/config.toml", "sessions_dir = '" + custom.Replace("\\", "\\\\") + "'\n");
+
+        var result = await new DiscoveryService().ScanAsync(profile);
+
+        Assert.Equal(SessionLifecycle.Active, Assert.Single(result.Sessions, x => x.Id == "active").Lifecycle);
+        Assert.Equal(SessionLifecycle.Archived, Assert.Single(result.Sessions, x => x.Id == "archived").Lifecycle);
+        Assert.Equal(SessionLifecycle.Unknown, Assert.Single(result.Sessions, x => x.Id == "unknown").Lifecycle);
+    }
+
+    [Fact]
+    public async Task DuplicateSessionAssociationsRemainInManifestButCanBeCountedById()
+    {
+        using var t = new TestTree();
+        var profile = t.Dir("profile");
+        var core = t.Dir("profile/.codex");
+        var projectA = t.Dir("repos/a");
+        var projectB = t.Dir("repos/b");
+        t.Write("profile/.codex/sessions/a.jsonl", "{\"type\":\"session_meta\",\"payload\":{\"id\":\"same\",\"title\":\"同一会话\",\"cwd\":\"" + Json(projectA) + "\"}}\n");
+        t.Write("profile/.codex/sessions/b.jsonl", "{\"type\":\"session_meta\",\"payload\":{\"id\":\"same\",\"title\":\"同一会话\",\"cwd\":\"" + Json(projectB) + "\"}}\n");
+
+        var result = await new DiscoveryService().ScanAsync(profile);
+
+        Assert.Equal(2, result.SessionAssociationCount);
+        Assert.Equal(1, result.UniqueSessionCount);
+        Assert.All(result.Sessions, session => Assert.Equal(SessionLifecycle.Active, session.Lifecycle));
+    }
+
+    [Fact]
     public async Task SkillAndMarketplaceLocalPathReferencesAreDiscoveredWithoutTreatingUrlsAsFiles()
     {
         using var t = new TestTree();

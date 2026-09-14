@@ -2,10 +2,11 @@ namespace CodexBackup.Core;
 
 public enum SourceKind { Core, Project, Memory, Skill, Plugin, Tool, Application, Environment, Custom, Session }
 public enum FindingLevel { Info, Warning, Blocker }
+public enum SessionLifecycle { Active, Archived, Unknown }
 public sealed record Finding(FindingLevel Level, string Code, string Message, string? Path = null);
 public static class ProductInfo
 {
-    public const string Version = "0.3.3-preview";
+    public const string Version = "0.3.4-preview";
 }
 
 public sealed class SourceItem
@@ -25,6 +26,10 @@ public sealed class SourceItem
     public DateTimeOffset? LastModifiedUtc { get; set; }
     public DateTimeOffset? LastActivityUtc { get; set; }
     public List<string> DependencyIds { get; set; } = [];
+    public string PriorityText => Required ? "必须备份" : Kind is SourceKind.Project or SourceKind.Session or SourceKind.Memory ? "建议备份" : "可选保存";
+    public int PriorityRank => Required ? 0 : Kind is SourceKind.Project or SourceKind.Session or SourceKind.Memory ? 1 : 2;
+    public string StatusText => !Exists ? "找不到" : Required ? "必选" : Selected ? "已选择" : "未选择";
+    public bool HasProblem => !Exists || (Required && !Selected);
 }
 
 public sealed class ScanResult
@@ -51,6 +56,12 @@ public sealed class SessionReference
     public string ProjectPath { get; set; } = "";
     public string TranscriptPath { get; set; } = "";
     public DateTimeOffset? LastActivityUtc { get; set; }
+    public SessionLifecycle Lifecycle { get; set; } = SessionLifecycle.Unknown;
+    public bool Selected { get; set; } = true;
+    public bool HasMissingTranscript => string.IsNullOrWhiteSpace(TranscriptPath) || !File.Exists(TranscriptPath);
+    public bool HasMissingProject => string.IsNullOrWhiteSpace(ProjectPath) || !Directory.Exists(ProjectPath);
+    public bool HasProjectResidue => Lifecycle == SessionLifecycle.Archived && !HasMissingProject;
+    public bool IsComplete => !HasMissingTranscript && !HasMissingProject;
 }
 
 public sealed record OperationProgress(string Phase, string Message, long Files = 0, long Bytes = 0, long? TotalBytes = null);
@@ -61,6 +72,7 @@ public sealed class BackupRequest
     public List<string> CoverageNotes { get; set; } = [];
     public bool CompleteMigration { get; set; }
     public List<SessionReference> Sessions { get; set; } = [];
+    public int DiscoveredSessionCount { get; set; }
     public List<Finding> DiscoveryFindings { get; set; } = [];
     public Dictionary<string,string> PathReplacements { get; set; } = new(StringComparer.OrdinalIgnoreCase);
     public string SourceCodexVersion { get; set; } = "未知";

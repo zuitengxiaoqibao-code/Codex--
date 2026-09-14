@@ -176,7 +176,7 @@ public sealed class DiscoveryService
             }
             try
             {
-                if (Directory.EnumerateFiles(current, "*.jsonl").Any()) { ScanSessionTree(current, scannedCoreRoots.FirstOrDefault() ?? current, token); discoveries++; continue; }
+                if (Directory.EnumerateFiles(current, "*.jsonl").Any()) { ScanSessionTree(current, scannedCoreRoots.FirstOrDefault() ?? current, token, InferSessionLifecycle(current)); discoveries++; continue; }
                 if (depth >= 5)
                 {
                     if (Directory.EnumerateDirectories(current).Any()) findings.Add(new(FindingLevel.Warning, "additional-depth-limit", "附加目录检测超过五层，深层内容未检测。", current));
@@ -207,7 +207,7 @@ public sealed class DiscoveryService
         }
         ScanManagedWorktrees(Path.Combine(root, "worktrees"), token);
         foreach (var directory in new[] { "sessions", "archived_sessions", "archived", "custom_sessions", "custom" })
-            ScanSessionTree(Path.Combine(root, directory), root, token);
+            ScanSessionTree(Path.Combine(root, directory), root, token, InferSessionLifecycle(directory));
 
         var pointer = Path.Combine(root, "memories", "obsidian-vault-path.txt");
         if (File.Exists(pointer))
@@ -745,7 +745,7 @@ public sealed class DiscoveryService
         return Regex.Replace(match.Groups["path"].Value, "\\s+", "").ToLowerInvariant();
     }
 
-    private void ScanSessionTree(string root, string corePath, CancellationToken token)
+    private void ScanSessionTree(string root, string corePath, CancellationToken token, SessionLifecycle lifecycle = SessionLifecycle.Unknown)
     {
         if (!Directory.Exists(root)) return;
         var queue = new Queue<(string Path, int Depth)>(); queue.Enqueue((root, 0)); var files = 0;
@@ -758,7 +758,7 @@ public sealed class DiscoveryService
                 foreach (var file in Directory.EnumerateFiles(current, "*.jsonl").Take(10001))
                 {
                     if (++files > 10000) { findings.Add(new(FindingLevel.Warning, "session-file-limit", "会话文件超过一万项，后续文件未检测。", root)); return; }
-                    ScanSessionJsonl(file, corePath, token);
+                    ScanSessionJsonl(file, corePath, token, lifecycle);
                 }
                 if (depth >= 8) { if (Directory.EnumerateDirectories(current).Any()) findings.Add(new(FindingLevel.Warning, "session-depth-limit", "会话目录超过八层，深层内容未检测。", current)); continue; }
                 var children = Directory.EnumerateDirectories(current).Take(1001).ToList();
@@ -771,7 +771,15 @@ public sealed class DiscoveryService
         }
     }
 
-    private void ScanSessionJsonl(string file, string corePath, CancellationToken token)
+    private static SessionLifecycle InferSessionLifecycle(string path)
+    {
+        var name = Path.GetFileName(Path.TrimEndingDirectorySeparator(path));
+        if (name.Equals("sessions", StringComparison.OrdinalIgnoreCase)) return SessionLifecycle.Active;
+        if (name.Equals("archived", StringComparison.OrdinalIgnoreCase) || name.Equals("archived_sessions", StringComparison.OrdinalIgnoreCase)) return SessionLifecycle.Archived;
+        return SessionLifecycle.Unknown;
+    }
+
+    private void ScanSessionJsonl(string file, string corePath, CancellationToken token, SessionLifecycle lifecycle = SessionLifecycle.Unknown)
     {
         try
         {
@@ -791,7 +799,7 @@ public sealed class DiscoveryService
                 DateTimeOffset? activity = null;
                 foreach (var name in new[] { "updated_at", "updatedAt", "timestamp", "created_at" })
                     if (meta.TryGetProperty(name, out var value) && TryParseActivity(value, out var parsed)) { activity = parsed; break; }
-                AddSession(Text(meta, "id") ?? Text(meta, "session_id"), Text(meta, "title"), corePath, Text(meta, "cwd"), file, activity, $"会话文件元数据：{file}", token);
+                AddSession(Text(meta, "id") ?? Text(meta, "session_id"), Text(meta, "title"), corePath, Text(meta, "cwd"), file, activity, $"会话文件元数据：{file}", token, lifecycle);
                 return;
             }
             if (truncated) findings.Add(new(FindingLevel.Warning, "session-metadata-truncated", "会话文件开头超过元数据读取上限，未找到可确认的 session_meta。", file));
@@ -801,7 +809,7 @@ public sealed class DiscoveryService
         catch (Exception ex) { findings.Add(new(FindingLevel.Warning, "session-meta-unreadable", $"无法读取会话元数据（{ex.GetType().Name}）。", file)); }
     }
 
-    private void AddSession(string? id, string? title, string corePath, string? projectPath, string? transcriptPath, DateTimeOffset? activity, string evidence, CancellationToken token = default)
+    private void AddSession(string? id, string? title, string corePath, string? projectPath, string? transcriptPath, DateTimeOffset? activity, string evidence, CancellationToken token = default, SessionLifecycle lifecycle = SessionLifecycle.Unknown)
     {
         if (string.IsNullOrWhiteSpace(transcriptPath)) { findings.Add(new(FindingLevel.Blocker,"session-transcript-unknown","会话记录没有提供对话文件位置，无法确认备份齐全。",corePath)); return; }
         string transcript;
@@ -819,8 +827,13 @@ public sealed class DiscoveryService
         var normalizedCore = Normalize(corePath);
         var sessionId = string.IsNullOrWhiteSpace(id) ? Path.GetFileNameWithoutExtension(transcript) : id;
         var existing = sessions.FirstOrDefault(x => Paths.Equals(x.CorePath, normalizedCore) && Paths.Equals(x.TranscriptPath, transcript) && Paths.Equals(x.ProjectPath, project) && x.Id == sessionId);
-        if (existing is null) sessions.Add(new() { Id = sessionId, Title = title ?? "", CorePath = normalizedCore, ProjectPath = project, TranscriptPath = transcript, LastActivityUtc = activity });
-        else if (activity > existing.LastActivityUtc) existing.LastActivityUtc = activity;
+        if (existing is null) sessions.Add(new() { Id = sessionId, Title = title ?? "", CorePath = normalizedCore, ProjectPath = project, TranscriptPath = transcript, LastActivityUtc = activity, Lifecycle = lifecycle });
+        else
+        {
+            if (activity > existing.LastActivityUtc) existing.LastActivityUtc = activity;
+            if (existing.Lifecycle == SessionLifecycle.Unknown || lifecycle == SessionLifecycle.Active) existing.Lifecycle = lifecycle;
+            if (string.IsNullOrWhiteSpace(existing.Title) && !string.IsNullOrWhiteSpace(title)) existing.Title = title;
+        }
     }
 
     private static (List<string> Lines, bool Truncated) ReadBoundedLines(string file, int maxLines, int maxBytes)

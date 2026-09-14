@@ -3,9 +3,11 @@ using System.ComponentModel;
 using System.Diagnostics;
 using System.Globalization;
 using System.IO;
+using System.Windows.Media;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Data;
+using System.Windows.Threading;
 using Microsoft.Win32;
 using CodexBackup.Core;
 
@@ -18,7 +20,11 @@ public partial class MainWindow : Window
     private readonly PackageVerifier verifier = new();
     private readonly RestoreEngine restoreEngine = new();
     private readonly ObservableCollection<SourceItem> sources = [];
+    private readonly ObservableCollection<FindingGroup> findingGroups = [];
+    private readonly ObservableCollection<SessionGroupRow> sessionRows = [];
     private readonly ObservableCollection<MappingRow> mappings = [];
+    private readonly ICollectionView sourcesView;
+    private readonly ICollectionView sessionView;
     private CancellationTokenSource? operationCts;
     private ScanResult? scan;
     private VerifiedPackage? verifiedPackage;
@@ -28,15 +34,27 @@ public partial class MainWindow : Window
     private readonly List<string> additionalRoots = [];
     private readonly Dictionary<string,string> pathReplacements = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string,bool> baseRequired = [];
+    private bool syncingSelection;
 
     public MainWindow()
     {
         InitializeComponent();
-        SourcesGrid.ItemsSource = sources;
+        sourcesView = CollectionViewSource.GetDefaultView(sources);
+        sourcesView.Filter = SourceFilter;
+        sourcesView.SortDescriptions.Add(new SortDescription(nameof(SourceItem.PriorityRank), ListSortDirection.Ascending));
+        sourcesView.SortDescriptions.Add(new SortDescription(nameof(SourceItem.Kind), ListSortDirection.Ascending));
+        sourcesView.SortDescriptions.Add(new SortDescription(nameof(SourceItem.Name), ListSortDirection.Ascending));
+        SourcesGrid.ItemsSource = sourcesView;
+        sessionView = CollectionViewSource.GetDefaultView(sessionRows);
+        sessionView.Filter = SessionFilter;
+        SessionsGrid.ItemsSource = sessionView;
+        BackupFindingsList.ItemsSource = findingGroups;
         MappingsGrid.ItemsSource = mappings;
         ProfilePathBox.Text = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
         BackupDestinationBox.Text = "";
         SourcesGrid.BeginningEdit += (_, e) => { if (e.Column.DisplayIndex == 0 && e.Row.Item is SourceItem { Required: true }) e.Cancel = true; };
+        SourcesGrid.CellEditEnding += SourcesGrid_CellEditEnding;
+        SessionsGrid.CellEditEnding += SessionsGrid_CellEditEnding;
         MappingsGrid.CellEditEnding += (_, _) => { restorePreview = null; previewFingerprint = null; };
         Closing += Window_Closing;
     }
@@ -57,6 +75,191 @@ public partial class MainWindow : Window
     private void OpenRestore_Click(object sender, RoutedEventArgs e) => ShowPage(RestorePage);
     private void OpenCheck_Click(object sender, RoutedEventArgs e) => ShowPage(CheckPage);
     private void BackHome_Click(object sender, RoutedEventArgs e) => ShowPage(HomePage);
+
+    private void SourceFilterChanged(object sender, RoutedEventArgs e)
+    {
+        if (sourcesView is null) return;
+        sourcesView.Refresh(); UpdateSourceSummary();
+        UpdateSourceSummary();
+    }
+
+    private bool SourceFilter(object value)
+    {
+        if (value is not SourceItem item) return false;
+        var search = SourceSearchBox?.Text?.Trim() ?? "";
+        if (search.Length > 0 && !string.Join(" ", item.Name, item.Path, item.Reason, item.DiscoveredBy).Contains(search, StringComparison.OrdinalIgnoreCase)) return false;
+        return SourceFilterBox?.SelectedIndex switch
+        {
+            1 => item.Required,
+            2 => item.Exists,
+            3 => item.HasProblem,
+            4 => item.Kind is SourceKind.Core or SourceKind.Project or SourceKind.Session or SourceKind.Memory,
+            5 => item.Kind is SourceKind.Environment or SourceKind.Skill or SourceKind.Plugin or SourceKind.Tool or SourceKind.Application,
+            _ => true
+        };
+    }
+
+    private void SessionFilterChanged(object sender, RoutedEventArgs e)
+    {
+        if (sessionView is null) return;
+        sessionView.Refresh();
+        UpdateSessionSummary();
+    }
+
+    private bool SessionFilter(object value)
+    {
+        if (value is not SessionGroupRow row) return false;
+        var search = SessionSearchBox?.Text?.Trim() ?? "";
+        if (search.Length > 0 && !string.Join(" ", row.Id, row.Title, row.ProjectPath, row.TranscriptPath).Contains(search, StringComparison.OrdinalIgnoreCase)) return false;
+        return SessionFilterBox?.SelectedIndex switch
+        {
+            1 => row.IsActive,
+            2 => row.IsArchived,
+            3 => row.HasUnknownLifecycle,
+            4 => row.HasMissingLink,
+            5 => row.HasArchivedResidue,
+            6 => row.Selected,
+            _ => true
+        };
+    }
+
+    private void SelectVisibleSessions_Click(object sender, RoutedEventArgs e) => SetVisibleSessions(true);
+    private void ClearVisibleSessions_Click(object sender, RoutedEventArgs e) => SetVisibleSessions(false);
+    private void SelectAllActiveSessions_Click(object sender, RoutedEventArgs e) => SetSessionsBy(row => row.IsActive, true);
+    private void SelectAllArchivedSessions_Click(object sender, RoutedEventArgs e) => SetSessionsBy(row => row.IsArchived, true);
+    private void SelectCompleteSessions_Click(object sender, RoutedEventArgs e) => SetSessionsBy(row => !row.HasMissingLink, true);
+    private void SelectProblemSessions_Click(object sender, RoutedEventArgs e) => SetSessionsBy(row => row.HasMissingLink || row.HasArchivedResidue, true);
+
+    private void SelectVisibleSources_Click(object sender, RoutedEventArgs e) => SetVisibleSources(true);
+    private void ClearVisibleSources_Click(object sender, RoutedEventArgs e) => SetVisibleSources(false);
+    private void SelectRequiredSources_Click(object sender, RoutedEventArgs e) => SetSourcesBy(source => source.Required, true);
+    private void SelectProjectSources_Click(object sender, RoutedEventArgs e) => SetSourcesBy(source => source.Kind is SourceKind.Project or SourceKind.Session or SourceKind.Memory, true);
+
+    private void SetVisibleSources(bool selected)
+    {
+        foreach (var source in sourcesView.Cast<object>().OfType<SourceItem>())
+            if (selected || !source.Required) source.Selected = selected;
+        sourcesView.Refresh(); SourcesGrid.Items.Refresh(); RefreshCoverage();
+    }
+
+    private void SetSourcesBy(Func<SourceItem, bool> predicate, bool selected)
+    {
+        foreach (var source in sources.Where(predicate))
+            if (selected || !source.Required) source.Selected = selected;
+        sourcesView.Refresh(); SourcesGrid.Items.Refresh(); RefreshCoverage();
+    }
+
+    private void SetVisibleSessions(bool selected)
+    {
+        foreach (var row in sessionRows.Where(row => sessionView.Cast<object>().Contains(row))) SetSessionSelection(row, selected);
+        sessionView.Refresh(); UpdateSessionSummary(); RefreshCoverage();
+    }
+
+    private void SetSessionsBy(Func<SessionGroupRow, bool> predicate, bool selected)
+    {
+        foreach (var row in sessionRows.Where(predicate)) SetSessionSelection(row, selected);
+        sessionView.Refresh(); UpdateSessionSummary(); RefreshCoverage();
+    }
+
+    private void SessionsGrid_CellEditEnding(object? sender, DataGridCellEditEndingEventArgs e)
+    {
+        if (e.Column.DisplayIndex != 0 || e.Row.Item is not SessionGroupRow row) return;
+        Dispatcher.BeginInvoke(DispatcherPriority.DataBind, new Action(() =>
+        {
+            SetSessionSelection(row, row.Selected);
+            UpdateSessionSummary(); RefreshCoverage();
+        }));
+    }
+
+    private void SourcesGrid_CellEditEnding(object? sender, DataGridCellEditEndingEventArgs e)
+    {
+        if (syncingSelection || e.Column.DisplayIndex != 0 || e.Row.Item is not SourceItem item) return;
+        Dispatcher.BeginInvoke(DispatcherPriority.DataBind, new Action(() =>
+        {
+            if (item.Required) item.Selected = true;
+            if (!item.Selected)
+            {
+                foreach (var row in sessionRows.Where(row => row.Selected && SessionSources(row).Contains(item)))
+                    SetSessionSelection(row, false);
+            }
+            sourcesView.Refresh(); SourcesGrid.Items.Refresh(); UpdateSessionSummary(); RefreshCoverage();
+        }));
+    }
+
+    private void SetSessionSelection(SessionGroupRow row, bool selected)
+    {
+        if (syncingSelection) return;
+        syncingSelection = true;
+        try
+        {
+            row.Selected = selected;
+            foreach (var reference in row.References) reference.Selected = selected;
+            var related = SessionSources(row).ToList();
+            if (selected)
+            {
+                foreach (var source in related) source.Selected = true;
+            }
+            else
+            {
+                foreach (var source in related.Where(source => !source.Required && !sessionRows.Where(other => other != row && other.Selected).Any(other => SessionSources(other).Contains(source))))
+                    source.Selected = false;
+            }
+            sourcesView.Refresh(); SourcesGrid.Items.Refresh();
+        }
+        finally { syncingSelection = false; }
+    }
+
+    private IEnumerable<SourceItem> SessionSources(SessionGroupRow row)
+    {
+        var direct = row.References.SelectMany(reference => sources.Where(source => IsRelated(source, reference))).ToList();
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var queue = new Queue<SourceItem>(direct);
+        while (queue.Count > 0)
+        {
+            var source = queue.Dequeue();
+            if (!seen.Add(source.Id)) continue;
+            yield return source;
+            foreach (var dependency in sources.Where(candidate => source.DependencyIds.Contains(candidate.Id, StringComparer.OrdinalIgnoreCase))) queue.Enqueue(dependency);
+        }
+        foreach (var memory in sources.Where(source => source.Kind == SourceKind.Memory))
+            if (seen.Add(memory.Id)) yield return memory;
+        foreach (var required in sources.Where(source => source.Required))
+            if (seen.Add(required.Id)) yield return required;
+    }
+
+    private bool IsRelated(SourceItem source, SessionReference reference)
+    {
+        try
+        {
+            var path = MigrationCoverage.Canonical(source.Path);
+            if (source.Kind == SourceKind.Core && !string.IsNullOrWhiteSpace(reference.CorePath) && PathsEqual(path, MigrationCoverage.Resolve(reference.CorePath, pathReplacements))) return true;
+            if (source.Kind == SourceKind.Session && !string.IsNullOrWhiteSpace(reference.TranscriptPath) && PathsEqual(path, MigrationCoverage.Resolve(reference.TranscriptPath, pathReplacements))) return true;
+            if (source.Kind == SourceKind.Project && !string.IsNullOrWhiteSpace(reference.ProjectPath))
+            {
+                var project = MigrationCoverage.Resolve(reference.ProjectPath, pathReplacements);
+                return PathsEqual(path, project) || source.IsDirectory && PathSafety.Contains(path, project);
+            }
+        }
+        catch { }
+        return false;
+    }
+
+    private static bool PathsEqual(string left, string right) => !string.IsNullOrWhiteSpace(right) && string.Equals(left, MigrationCoverage.Canonical(right), StringComparison.OrdinalIgnoreCase);
+
+    private void UpdateSourceSummary()
+    {
+        if (SourceSummaryText is null) return;
+        var visible = sourcesView.Cast<object>().OfType<SourceItem>().ToList();
+        SourceSummaryText.Text = $"显示 {visible.Count} / {sources.Count} 项；必须备份 {sources.Count(x => x.Required)} 项；找不到 {sources.Count(x => !x.Exists)} 项。双击或筛选不会改变备份范围，只有“保存”勾选会改变范围。";
+    }
+
+    private void UpdateSessionSummary()
+    {
+        if (SessionSummaryText is null) return;
+        var visible = sessionView.Cast<object>().OfType<SessionGroupRow>().ToList();
+        SessionSummaryText.Text = $"显示 {visible.Count} / {sessionRows.Count} 个独立会话；已选择 {sessionRows.Count(x => x.Selected)} 个；活动 {sessionRows.Count(x => x.IsActive)}，归档 {sessionRows.Count(x => x.IsArchived)}，状态未知 {sessionRows.Count(x => x.HasUnknownLifecycle)}。"
+            + (sessionRows.Any(x => x.HasArchivedResidue) ? " 紫色提示表示归档会话仍保留项目文件。" : "");
+    }
 
     private static string? PickFolder(string title, string? initial = null)
     {
@@ -90,7 +293,9 @@ public partial class MainWindow : Window
             sources.Clear(); foreach (var item in scan.Items) sources.Add(item);
             baseRequired.Clear(); foreach (var item in sources) baseRequired[item.Id] = item.Required;
             foreach (var replacement in pathReplacements.Values.Distinct(StringComparer.OrdinalIgnoreCase)) if (Directory.Exists(replacement) || File.Exists(replacement)) AddManual(replacement, Directory.Exists(replacement));
-            SessionsGrid.ItemsSource = scan.Sessions;
+            sessionRows.Clear();
+            foreach (var group in SessionGroupRow.Create(scan.Sessions)) sessionRows.Add(group);
+            sessionView.Refresh();
             ApplyBackupMode(); RefreshCoverage();
         });
     }
@@ -112,6 +317,7 @@ public partial class MainWindow : Window
         var full = Path.GetFullPath(path);
         if (sources.Any(x => string.Equals(Path.GetFullPath(x.Path), full, StringComparison.OrdinalIgnoreCase))) return;
         sources.Add(new SourceItem { Name = Path.GetFileName(full), Path = full, Kind = SourceKind.Custom, Selected = true, Exists = true, IsDirectory = directory, Reason = "用户手动加入", DiscoveredBy = "手动选择", LastModifiedUtc = directory ? Directory.GetLastWriteTimeUtc(full) : File.GetLastWriteTimeUtc(full) });
+        sourcesView.Refresh(); UpdateSourceSummary();
     }
 
     private void AddScanLocation_Click(object sender, RoutedEventArgs e)
@@ -148,14 +354,14 @@ public partial class MainWindow : Window
             else if (item.Required) item.Selected = true;
             item.Reason = relocated ? "原位置已搬走，将从指定的新位置保存，并在恢复时重连路径" : item.Required ? "完整迁移需要此项，避免会话、源码或依赖漏掉" : !item.Exists ? "原文件未找到，请定位新位置；缺失不能算完整" : "自选内容；取消后只保存剩余文件";
         }
-        SourcesGrid.Items.Refresh();
+        sourcesView.Refresh(); SourcesGrid.Items.Refresh();
     }
     private BackupRequest CurrentBackupRequest()
     {
         var request = new BackupRequest
         {
             Sources = sources.ToList(), DestinationDirectory = BackupDestinationBox.Text.Trim(), CompleteMigration = BackupModeBox.SelectedIndex == 0,
-            Sessions = scan?.Sessions.ToList() ?? [], DiscoveryFindings = scan?.Findings.ToList() ?? [],
+            Sessions = scan?.Sessions.Where(s => s.Selected).ToList() ?? [], DiscoveredSessionCount = scan?.SessionAssociationCount ?? 0, DiscoveryFindings = scan?.Findings.ToList() ?? [],
             CoverageNotes = scan?.Findings.Select(UserGuidance.Explain).ToList() ?? [], PathReplacements = new(pathReplacements, StringComparer.OrdinalIgnoreCase),
             SourceCodexVersion = scan?.CodexVersion ?? "未知", EnvironmentManifest = scan?.EnvironmentManifest ?? new(),
             EncryptionPassword = EncryptionModeBox.SelectedIndex == 1 ? EncryptionPasswordBox.Password : null
@@ -169,7 +375,7 @@ public partial class MainWindow : Window
         var gaps = MigrationCoverage.Evaluate(CurrentBackupRequest());
         var drives = sources.Where(s => s.Exists).Select(s => Path.GetPathRoot(s.Path)).Distinct(StringComparer.OrdinalIgnoreCase);
         var preflight = PreflightReport.Build(scan, CurrentBackupRequest());
-        CoverageSummaryText.Text = $"独立会话 {scan.UniqueSessionCount} 个；会话关联记录 {scan.SessionAssociationCount} 条；项目位置 {scan.ProjectLocationCount} 个。涉及磁盘：{string.Join("、", drives)}。\n" +
+        CoverageSummaryText.Text = $"独立会话 {scan.UniqueSessionCount} 个，已选择 {sessionRows.Count(x => x.Selected)} 个；关联记录 {scan.SessionAssociationCount} 条；项目位置 {scan.ProjectLocationCount} 个。涉及磁盘：{string.Join("、", drives)}。\n" +
             (BackupModeBox.SelectedIndex != 0 ? "当前是自选 / 抢救模式，结果不会标记为完整迁移。" : gaps.Count == 0 ? "本次扫描的会话与项目已选齐。备份时还会按真实文件清单再次核对。" : $"还有 {gaps.Count} 项需要处理，暂不能制作完整迁移包。");
         PreflightStatusText.Text = preflight.Status switch
         {
@@ -177,11 +383,13 @@ public partial class MainWindow : Window
             PreflightStatus.Blocked => $"重装判定：需要处理后再重装（还有 {gaps.Count} 项必须处理）",
             _ => "重装判定：仅可抢救（当前选择允许部分保存，不能保证完整迁移）"
         };
-        BackupFindingsList.Items.Clear();
-        foreach (var finding in gaps.Concat(scan.Findings.Where(f => f.Code != "known-location-missing" && (!f.Code.Contains("missing") || BackupModeBox.SelectedIndex != 0))).DistinctBy(f => (f.Code, f.Path)).Take(150))
-            BackupFindingsList.Items.Add(UserGuidance.Explain(finding));
-        if (gaps.Count > 150) BackupFindingsList.Items.Add("问题较多，更多位置可在来源列表与技术详细记录中查找；没有省略备份前的完整检查。");
+        findingGroups.Clear();
+        var visibleFindings = gaps.Concat(scan.Findings.Where(f => f.Code != "known-location-missing" && (!f.Code.Contains("missing") || BackupModeBox.SelectedIndex != 0)))
+            .DistinctBy(f => (f.Code, f.Path)).Take(300).ToList();
+        foreach (var group in FindingGroup.Create(visibleFindings)) findingGroups.Add(group);
+        if (gaps.Count > 300) findingGroups.Add(FindingGroup.ForOverflow(gaps.Count - 300));
         TechnicalDetailsBox.Text = string.Join(Environment.NewLine, scan.Findings.Concat(gaps).Select(f => $"{f.Code}: {f.Message} {f.Path}"));
+        UpdateSourceSummary(); UpdateSessionSummary();
     }
     private void CheckCoverage_Click(object sender, RoutedEventArgs e)
     {
@@ -514,6 +722,125 @@ public partial class MainWindow : Window
     private static string UserMessage(Exception ex) => UserGuidance.ExplainException(ex);
 }
 
+public sealed class SessionGroupRow : INotifyPropertyChanged
+{
+    private bool selected;
+
+    private SessionGroupRow(string id, IReadOnlyList<SessionReference> references)
+    {
+        Id = id;
+        References = references;
+        selected = references.All(reference => reference.Selected);
+    }
+
+    public event PropertyChangedEventHandler? PropertyChanged;
+    public string Id { get; }
+    public IReadOnlyList<SessionReference> References { get; }
+    public string Title => References.Select(reference => reference.Title).FirstOrDefault(title => !string.IsNullOrWhiteSpace(title)) ?? "未命名会话";
+    public string ProjectPath => JoinPaths(References.Select(reference => reference.ProjectPath));
+    public string TranscriptPath => JoinPaths(References.Select(reference => reference.TranscriptPath));
+    public int AssociationCount => References.Count;
+    public DateTimeOffset? LastActivityUtc => References.Max(reference => reference.LastActivityUtc);
+    public bool IsActive => References.Any(reference => reference.Lifecycle == SessionLifecycle.Active);
+    public bool IsArchived => !IsActive && References.Any(reference => reference.Lifecycle == SessionLifecycle.Archived);
+    public bool HasUnknownLifecycle => References.Any(reference => reference.Lifecycle == SessionLifecycle.Unknown) || IsActive && IsArchived;
+    public bool HasMissingLink => References.Any(reference => reference.HasMissingProject || reference.HasMissingTranscript);
+    public bool HasArchivedResidue => References.Any(reference => reference.HasProjectResidue);
+    public string LifecycleText => IsActive && IsArchived ? "活动 + 归档" : IsActive ? "活动目录" : IsArchived ? "已归档" : "状态未知";
+    public string StatusText => HasMissingLink ? "缺少关联文件" : HasArchivedResidue ? "归档会话仍保留项目" : "关联完整";
+    public string LinkText => HasMissingLink ? "请补齐项目或对话文件" : HasArchivedResidue ? "项目文件仍在本机，可一并保存" : "会话与项目已关联";
+    public Brush LifecycleBrush => IsActive ? Brushes.ForestGreen : IsArchived ? Brushes.MediumPurple : Brushes.DimGray;
+    public Brush StatusBrush => HasMissingLink ? Brushes.Firebrick : HasArchivedResidue ? Brushes.MediumPurple : Brushes.ForestGreen;
+    public bool Selected
+    {
+        get => selected;
+        set
+        {
+            if (selected == value) return;
+            selected = value;
+            PropertyChanged?.Invoke(this, new(nameof(Selected)));
+        }
+    }
+
+    public static IEnumerable<SessionGroupRow> Create(IEnumerable<SessionReference> references) => references
+        .GroupBy(reference => string.IsNullOrWhiteSpace(reference.Id) ? reference.TranscriptPath : reference.Id, StringComparer.OrdinalIgnoreCase)
+        .Select(group => new SessionGroupRow(group.Key, group.ToList()))
+        .OrderByDescending(row => row.LastActivityUtc ?? DateTimeOffset.MinValue)
+        .ThenBy(row => row.Title, StringComparer.OrdinalIgnoreCase);
+
+    private static string JoinPaths(IEnumerable<string> paths)
+    {
+        var values = paths.Where(path => !string.IsNullOrWhiteSpace(path)).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+        return values.Count <= 2 ? string.Join("\n", values) : string.Join("\n", values.Take(2)) + $"\n（另有 {values.Count - 2} 个位置）";
+    }
+}
+
+public sealed class FindingRow
+{
+    public FindingRow(Finding finding)
+    {
+        Finding = finding;
+        PriorityText = finding.Level switch { FindingLevel.Blocker => "必须先处理", FindingLevel.Warning => "需要核对", _ => "说明" };
+        Category = CategoryFor(finding.Code);
+        Reason = finding.Message;
+        Impact = finding.Level switch
+        {
+            FindingLevel.Blocker => "会阻止完整迁移，当前结果不能支持重装。",
+            FindingLevel.Warning => "可能漏掉部分内容，需要在来源列表中确认。",
+            _ => "不会阻止备份，但恢复后需要按说明复核。"
+        };
+        Action = UserGuidance.Explain(finding).Split("\n处理：", StringSplitOptions.None).LastOrDefault() ?? "按位置和说明处理后重新检查。";
+    }
+
+    public Finding Finding { get; }
+    public FindingLevel Level => Finding.Level;
+    public string PriorityText { get; }
+    public string Category { get; }
+    public string Reason { get; }
+    public string Impact { get; }
+    public string Action { get; }
+    public string Path => Finding.Path ?? "";
+    public Brush AccentBrush => Level switch { FindingLevel.Blocker => Brushes.Firebrick, FindingLevel.Warning => Brushes.DarkGoldenrod, _ => Brushes.RoyalBlue };
+
+    private static string CategoryFor(string code) => code switch
+    {
+        var value when value.Contains("session", StringComparison.OrdinalIgnoreCase) || value.Contains("project", StringComparison.OrdinalIgnoreCase) => "会话与项目关联",
+        var value when value.Contains("config", StringComparison.OrdinalIgnoreCase) || value.Contains("path", StringComparison.OrdinalIgnoreCase) || value.Contains("sqlite", StringComparison.OrdinalIgnoreCase) => "配置与路径",
+        var value when value.Contains("active") || value.Contains("wal", StringComparison.OrdinalIgnoreCase) || value.Contains("writer", StringComparison.OrdinalIgnoreCase) => "运行状态",
+        var value when value.Contains("git", StringComparison.OrdinalIgnoreCase) => "项目版本依赖",
+        var value when value.Contains("msix", StringComparison.OrdinalIgnoreCase) || value.Contains("version", StringComparison.OrdinalIgnoreCase) => "安装与版本",
+        var value when value.Contains("coverage", StringComparison.OrdinalIgnoreCase) || value.Contains("boundary", StringComparison.OrdinalIgnoreCase) => "扫描边界",
+        _ => "其他检查"
+    };
+}
+
+public sealed class FindingGroup
+{
+    private FindingGroup(FindingLevel level, string category, IReadOnlyList<FindingRow> items, string? customHeader = null)
+    {
+        Level = level;
+        Category = category;
+        Items = items;
+        Header = customHeader ?? $"{LevelText} · {category}（{items.Count}）";
+    }
+
+    public FindingLevel Level { get; }
+    public string Category { get; }
+    public IReadOnlyList<FindingRow> Items { get; }
+    public string Header { get; }
+    public string LevelText => Level switch { FindingLevel.Blocker => "必须先处理", FindingLevel.Warning => "需要核对", _ => "说明" };
+    public Brush AccentBrush => Level switch { FindingLevel.Blocker => Brushes.Firebrick, FindingLevel.Warning => Brushes.DarkGoldenrod, _ => Brushes.RoyalBlue };
+
+    public static IEnumerable<FindingGroup> Create(IEnumerable<Finding> findings) => findings
+        .Select(finding => new FindingRow(finding))
+        .GroupBy(row => (row.Level, row.Category))
+        .OrderBy(group => group.Key.Level switch { FindingLevel.Blocker => 0, FindingLevel.Warning => 1, _ => 2 })
+        .ThenBy(group => group.Key.Category, StringComparer.Ordinal)
+        .Select(group => new FindingGroup(group.Key.Level, group.Key.Category, group.OrderBy(row => row.Path, StringComparer.OrdinalIgnoreCase).ToList()));
+
+    public static FindingGroup ForOverflow(int count) => new(FindingLevel.Warning, "扫描边界", [new FindingRow(new Finding(FindingLevel.Warning, "finding-overflow", $"还有 {count} 项检查未在摘要中展开，请使用筛选或技术记录查看。"))], "需要核对 · 还有未展开的检查");
+}
+
 public sealed class MappingRow
 {
     public MappingRow(string rootId, string originalPath, string targetPath, SourceKind kind)
@@ -541,4 +868,27 @@ public sealed class SourceKindChineseConverter : IValueConverter
         SourceKind.Application => "应用", SourceKind.Environment => "环境", SourceKind.Custom => "自定义", SourceKind.Session => "会话文件",
         _ => "未知"
     };
+}
+
+public sealed class SourcePriorityBrushConverter : IValueConverter
+{
+    public object Convert(object value, Type targetType, object parameter, CultureInfo culture) => value switch
+    {
+        "必须备份" => Brushes.Firebrick,
+        "建议备份" => Brushes.DarkGoldenrod,
+        _ => Brushes.DimGray
+    };
+    public object ConvertBack(object value, Type targetType, object parameter, CultureInfo culture) => Binding.DoNothing;
+}
+
+public sealed class SourceStatusBrushConverter : IValueConverter
+{
+    public object Convert(object value, Type targetType, object parameter, CultureInfo culture) => value switch
+    {
+        "找不到" => Brushes.Firebrick,
+        "必选" => Brushes.Firebrick,
+        "已选择" => Brushes.ForestGreen,
+        _ => Brushes.DimGray
+    };
+    public object ConvertBack(object value, Type targetType, object parameter, CultureInfo culture) => Binding.DoNothing;
 }

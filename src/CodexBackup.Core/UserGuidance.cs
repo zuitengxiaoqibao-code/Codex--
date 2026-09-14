@@ -29,6 +29,7 @@ public static class UserGuidance
         if (code.Contains("missing")) return "找不到原来的文件\n影响：对应项目或会话可能无法恢复，不能把缺失内容算作已备份。\n处理：接上原硬盘，或在来源列表选中该项，点击“定位已搬走的文件”。" + location;
         if (code == "active-writers" || code.Contains("wal")) return "Codex 还在使用数据\n影响：刚产生的会话或项目记录可能尚未保存完整。\n处理：正常退出 Codex、终端任务和桥接工具后，点击“重新扫描”。本工具不会替你强制关闭程序。" + location;
         if (code == "coverage-boundary") return "还有需要单独确认的内容\n网络电脑、云端任务、WSL、Docker 和其他 Windows 用户不属于本机目录扫描。若你使用过它们，请先导出到本地，再添加到备份。";
+        if (code == "complete-session-selection") return "完整迁移还没有包含全部已发现会话\n影响：如果继续，备份包不能证明会话列表完整。\n处理：在会话列表中选择全部需要保留的活动和归档会话；只想保存其中一部分时，请切换到自选 / 抢救模式。" + location;
         if (code.StartsWith("msix-") || code == "codex-version-unknown") return "部分安装信息暂未确认\n影响：不等于会话丢失，但不能据此确认新旧版本兼容。\n处理：以扫描找到的数据位置为准，恢复前安装 Codex；安装信息可在详细记录中核对。" + location;
         if (code.StartsWith("complete-")) return "完整迁移暂不能继续\n" + finding.Message + location;
         if (code.Contains("unknown") || code.Contains("incomplete") || code.Contains("unreadable") || code.Contains("limit") || code.Contains("invalid"))

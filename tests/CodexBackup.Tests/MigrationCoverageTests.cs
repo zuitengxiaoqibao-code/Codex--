@@ -92,6 +92,13 @@ public class MigrationCoverageTests
         Assert.Contains(MigrationCoverage.Evaluate(request),x=>x.Code=="complete-not-selected");
         project.Selected=true; Assert.Empty(MigrationCoverage.Evaluate(request));
     }
+    [Fact] public void CompleteModeRejectsIntentionallyOmittedDiscoveredSession()
+    {
+        using var t = new TestTree(); t.Write("home/config.toml", "");
+        var core = t.Source("home"); core.Kind = SourceKind.Core;
+        var request = new BackupRequest { CompleteMigration = true, Sources = [core], DiscoveredSessionCount = 2, Sessions = [new() { Id = "one" }] };
+        Assert.Contains(MigrationCoverage.Evaluate(request), finding => finding.Code == "complete-session-selection");
+    }
     [Fact] public void MovedProjectMustBeExplicitlyLocatedAndIncluded()
     {
         using var t=new TestTree(); t.Write("home/sessions/a.jsonl","{}"); t.Write("moved/app.cs","source");

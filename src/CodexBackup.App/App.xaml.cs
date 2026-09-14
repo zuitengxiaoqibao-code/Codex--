@@ -25,9 +25,10 @@ public partial class App : Application
             try
             {
                 window.Show(); window.UpdateLayout();
-                var expected = new[] { "WelcomePage", "HomePage", "BackupPage", "RestorePage", "CheckPage", "BusyPanel", "ResultPage" };
+                var expected = new[] { "WelcomePage", "HomePage", "BackupPage", "RestorePage", "CheckPage", "BusyPanel", "ResultPage", "SourcesGrid", "SourceFilterBox", "SourceSearchBox", "SessionsGrid", "SessionFilterBox", "SessionSearchBox", "BackupFindingsList", "SourceSummaryText", "SessionSummaryText" };
                 var missing = expected.Where(name => window.FindName(name) is null).ToArray();
                 string? screenshot = null;
+                string? backupScreenshot = null;
                 try
                 {
                     var bitmap = new RenderTargetBitmap((int)window.ActualWidth, (int)window.ActualHeight, 96, 96, PixelFormats.Pbgra32);
@@ -47,11 +48,20 @@ public partial class App : Application
                 }
                 Click("WelcomeContinue_Click", "HomePage");
                 Click("OpenBackup_Click", "BackupPage");
+                window.UpdateLayout();
+                try
+                {
+                    var bitmap = new RenderTargetBitmap((int)window.ActualWidth, (int)window.ActualHeight, 96, 96, PixelFormats.Pbgra32);
+                    bitmap.Render(window); var encoder = new PngBitmapEncoder(); encoder.Frames.Add(BitmapFrame.Create(bitmap));
+                    backupScreenshot = Path.Combine(Path.GetDirectoryName(output)!, Path.GetFileNameWithoutExtension(output) + ".backup.png");
+                    using var stream = File.Create(backupScreenshot); encoder.Save(stream);
+                }
+                catch { backupScreenshot = null; }
                 Click("BackHome_Click", "HomePage");
                 Click("OpenRestore_Click", "RestorePage");
                 Click("BackHome_Click", "HomePage");
                 Click("OpenCheck_Click", "CheckPage");
-                var report = new { initialized = true, namedControlsValid = missing.Length == 0, missing, screenshot, navigation, limitation = "验证窗口、静态渲染和入口事件导航；不代替文件选择对话框、完整向导及新系统人工验收。" };
+                var report = new { initialized = true, namedControlsValid = missing.Length == 0, missing, screenshot, backupScreenshot, navigation, limitation = "验证窗口、静态渲染和入口事件导航；不代替文件选择对话框、完整向导及新系统人工验收。" };
                 File.WriteAllText(output, JsonSerializer.Serialize(report, new JsonSerializerOptions { WriteIndented = true }));
                 Shutdown(missing.Length == 0 ? 0 : 2);
             }

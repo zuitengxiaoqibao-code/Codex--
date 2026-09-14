@@ -25,6 +25,8 @@ public static class MigrationCoverage
     {
         var result = new List<Finding>();
         if (!request.CompleteMigration) return result;
+        if (request.DiscoveredSessionCount > request.Sessions.Count)
+            result.Add(new(FindingLevel.Blocker, "complete-session-selection", $"当前完整迁移只选择了 {request.Sessions.Count} / {request.DiscoveredSessionCount} 条会话关联。请在会话列表中全选需要保留的会话；如果只想抢救部分会话，请切换到自选 / 抢救模式。"));
         var selected = request.Sources.Where(s => s.Selected && (Directory.Exists(s.Path) || File.Exists(s.Path))).ToList();
         foreach (var core in selected.Where(s => s.Kind == SourceKind.Core))
             foreach (var parent in selected.Where(s => s.IsDirectory && !Canonical(s.Path).Equals(Canonical(core.Path), StringComparison.OrdinalIgnoreCase) && PathSafety.Contains(s.Path, core.Path)))
