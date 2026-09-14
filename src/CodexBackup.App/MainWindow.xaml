@@ -275,6 +275,104 @@
 </DataGrid>
 </StackPanel>
 <StackPanel x:Name="SessionSelectionPanel" Margin="0,14,0,0">
+<WrapPanel Margin="0,0,0,10">
+<RadioButton x:Name="ProjectSessionViewRadio" Content="按项目目录选择（推荐）" IsChecked="True" GroupName="SessionViewMode" Checked="SessionViewModeChanged" Style="{StaticResource SessionViewRadioButton}"/>
+<RadioButton x:Name="IndividualSessionViewRadio" Content="按单条会话查看" GroupName="SessionViewMode" Checked="SessionViewModeChanged" Style="{StaticResource SessionViewRadioButton}"/>
+</WrapPanel>
+<StackPanel x:Name="ProjectSessionSelectionPanel">
+<DockPanel Margin="0,0,0,8">
+<TextBlock x:Name="ProjectSessionSummaryText" DockPanel.Dock="Right" Margin="14,7,4,0" Foreground="{StaticResource Muted}" TextWrapping="Wrap"/>
+<TextBlock Text="筛选" VerticalAlignment="Center" Margin="2,0,6,0" Foreground="{StaticResource Muted}"/>
+<ComboBox x:Name="ProjectSessionFilterBox" Width="165" SelectedIndex="0" SelectionChanged="ProjectSessionFilterChanged">
+<ComboBoxItem Content="全部项目目录"/>
+<ComboBoxItem Content="包含活动会话"/>
+<ComboBoxItem Content="包含归档会话"/>
+<ComboBoxItem Content="状态未知"/>
+<ComboBoxItem Content="存在缺失文件"/>
+<ComboBoxItem Content="已选择"/>
+</ComboBox>
+<TextBox x:Name="ProjectSessionSearchBox" Width="280" ToolTip="按项目名、目录或会话标题查找" TextChanged="ProjectSessionFilterChanged"/>
+</DockPanel>
+<WrapPanel Margin="0,0,0,8">
+<Button Content="选择筛选出的全部项目" Style="{StaticResource CompactButton}" Click="SelectVisibleProjectSessions_Click"/>
+<Button Content="取消筛选出的全部项目" Style="{StaticResource CompactButton}" Click="ClearVisibleProjectSessions_Click"/>
+</WrapPanel>
+<ListBox x:Name="ProjectSessionGroupsList" BorderThickness="0" Background="Transparent" MaxHeight="540" ScrollViewer.HorizontalScrollBarVisibility="Disabled" ScrollViewer.VerticalScrollBarVisibility="Auto" VirtualizingPanel.IsVirtualizing="True" VirtualizingPanel.VirtualizationMode="Recycling">
+<ListBox.ItemContainerStyle>
+<Style TargetType="ListBoxItem">
+<Setter Property="HorizontalContentAlignment" Value="Stretch"/>
+<Setter Property="Padding" Value="0"/>
+<Setter Property="Margin" Value="0,0,0,8"/>
+<Setter Property="FocusVisualStyle" Value="{x:Null}"/>
+</Style>
+</ListBox.ItemContainerStyle>
+<ListBox.ItemTemplate>
+<DataTemplate>
+<Border BorderBrush="{StaticResource Line}" BorderThickness="1" CornerRadius="9" Background="White" Padding="14">
+<Grid>
+<Grid.ColumnDefinitions>
+<ColumnDefinition Width="36"/>
+<ColumnDefinition Width="*"/>
+</Grid.ColumnDefinitions>
+<CheckBox Grid.Column="0" IsThreeState="True" IsChecked="{Binding SelectionState, Mode=OneWay}" Click="ProjectSessionSelection_Click" Style="{StaticResource GridCheckBox}" ToolTip="一次选择或取消这个项目目录下的全部会话"/>
+<Expander Grid.Column="1" IsExpanded="False">
+<Expander.Header>
+<Grid>
+<Grid.ColumnDefinitions>
+<ColumnDefinition Width="*"/>
+<ColumnDefinition Width="Auto"/>
+</Grid.ColumnDefinitions>
+<StackPanel>
+<TextBlock Text="{Binding Name}" FontSize="16" FontWeight="SemiBold" Foreground="{StaticResource Header}"/>
+<TextBlock Text="{Binding ProjectPath}" TextWrapping="Wrap" Foreground="{StaticResource Muted}" Margin="0,3,18,0"/>
+</StackPanel>
+<StackPanel Grid.Column="1" MinWidth="220">
+<TextBlock Text="{Binding CountText}" HorizontalAlignment="Right" FontWeight="SemiBold" Foreground="{StaticResource TealDark}"/>
+<TextBlock Text="{Binding SummaryText}" HorizontalAlignment="Right" Foreground="{StaticResource Muted}" Margin="0,3,0,0"/>
+<TextBlock Text="{Binding StatusText}" HorizontalAlignment="Right" Foreground="{Binding StatusBrush}" Margin="0,3,0,0"/>
+</StackPanel>
+</Grid>
+</Expander.Header>
+<ListBox ItemsSource="{Binding Rows}" Margin="0,12,0,0" MaxHeight="320" BorderThickness="0" Background="Transparent" ScrollViewer.HorizontalScrollBarVisibility="Disabled" VirtualizingPanel.IsVirtualizing="True" VirtualizingPanel.VirtualizationMode="Recycling">
+<ListBox.ItemContainerStyle>
+<Style TargetType="ListBoxItem">
+<Setter Property="HorizontalContentAlignment" Value="Stretch"/>
+<Setter Property="Padding" Value="0"/>
+<Setter Property="FocusVisualStyle" Value="{x:Null}"/>
+</Style>
+</ListBox.ItemContainerStyle>
+<ListBox.ItemTemplate>
+<DataTemplate>
+<Border BorderBrush="#E8EEF1" BorderThickness="0,1,0,0" Padding="2,9">
+<Grid>
+<Grid.ColumnDefinitions>
+<ColumnDefinition Width="38"/>
+<ColumnDefinition Width="150"/>
+<ColumnDefinition Width="*"/>
+<ColumnDefinition Width="145"/>
+<ColumnDefinition Width="190"/>
+</Grid.ColumnDefinitions>
+<CheckBox Grid.Column="0" IsChecked="{Binding Selected, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" Click="SessionSelection_Click" Style="{StaticResource GridCheckBox}"/>
+<TextBlock Grid.Column="1" Text="{Binding LifecycleText}" Foreground="{Binding LifecycleBrush}" FontWeight="SemiBold" VerticalAlignment="Center"/>
+<TextBlock Grid.Column="2" Text="{Binding Title}" TextTrimming="CharacterEllipsis" VerticalAlignment="Center" Margin="4,0,12,0"/>
+<TextBlock Grid.Column="3" Text="{Binding LastActivityText}" Foreground="{StaticResource Muted}" VerticalAlignment="Center"/>
+<TextBlock Grid.Column="4" Text="{Binding StatusText}" Foreground="{Binding StatusBrush}" TextWrapping="Wrap" VerticalAlignment="Center"/>
+</Grid>
+</Border>
+</DataTemplate>
+</ListBox.ItemTemplate>
+</ListBox>
+</Expander>
+</Grid>
+</Border>
+</DataTemplate>
+</ListBox.ItemTemplate>
+</ListBox>
+<Border Background="{StaticResource TealSoft}" BorderBrush="#B8DED8" BorderThickness="1" CornerRadius="7" Padding="10" Margin="0,4,0,0">
+<TextBlock Text="一个项目目录只显示一次。勾选项目会一次选择目录下全部会话；方框显示横线时，表示只选择了部分会话。展开项目后才需要处理单条会话。" TextWrapping="Wrap" Foreground="#315E5A"/>
+</Border>
+</StackPanel>
+<StackPanel x:Name="IndividualSessionSelectionPanel" Visibility="Collapsed">
 <DockPanel Margin="0,0,0,8">
 <TextBlock x:Name="SessionSummaryText" DockPanel.Dock="Right" Margin="14,7,4,0" Foreground="{StaticResource Muted}" TextWrapping="Wrap"/>
 <TextBlock Text="筛选" VerticalAlignment="Center" Margin="2,0,6,0" Foreground="{StaticResource Muted}"/>
@@ -330,6 +428,7 @@
 <Border Background="{StaticResource TealSoft}" BorderBrush="#B8DED8" BorderThickness="1" CornerRadius="7" Padding="10" Margin="0,8,0,0">
 <TextBlock Text="勾选只更新本次备份选择，不扫描磁盘。绿色=活动；紫色=已归档；灰色=状态未知；红色=缺少关联文件。" TextWrapping="Wrap" Foreground="#315E5A"/>
 </Border>
+</StackPanel>
 </StackPanel>
 <StackPanel x:Name="CleanupSelectionPanel" Visibility="Collapsed" Margin="0,14,0,0">
 <TextBlock x:Name="CleanupSummaryText" Margin="0,8" TextWrapping="Wrap"/>

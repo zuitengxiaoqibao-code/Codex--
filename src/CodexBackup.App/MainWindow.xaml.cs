@@ -22,10 +22,12 @@ public partial class MainWindow : Window
     private readonly ObservableCollection<SourceItem> sources = [];
     private readonly ObservableCollection<FindingGroup> findingGroups = [];
     private readonly ObservableCollection<SessionGroupRow> sessionRows = [];
+    private readonly ObservableCollection<ProjectSessionGroupRow> projectSessionGroups = [];
     private readonly ObservableCollection<CleanupCandidate> cleanupCandidates = [];
     private readonly ObservableCollection<MappingRow> mappings = [];
     private readonly ICollectionView sourcesView;
     private readonly ICollectionView sessionView;
+    private readonly ICollectionView projectSessionView;
     private readonly ICollectionView cleanupView;
     private CancellationTokenSource? operationCts;
     private ScanResult? scan;
@@ -55,6 +57,9 @@ public partial class MainWindow : Window
         sessionView = CollectionViewSource.GetDefaultView(sessionRows);
         sessionView.Filter = SessionFilter;
         SessionsGrid.ItemsSource = sessionView;
+        projectSessionView = CollectionViewSource.GetDefaultView(projectSessionGroups);
+        projectSessionView.Filter = ProjectSessionFilter;
+        ProjectSessionGroupsList.ItemsSource = projectSessionView;
         cleanupView = CollectionViewSource.GetDefaultView(cleanupCandidates);
         CleanupGrid.ItemsSource = cleanupView;
         BackupFindingsList.ItemsSource = findingGroups;
@@ -130,6 +135,37 @@ public partial class MainWindow : Window
         if (sessionView is null) return;
         sessionView.Refresh();
         UpdateSessionSummary();
+    }
+
+    private void ProjectSessionFilterChanged(object sender, RoutedEventArgs e)
+    {
+        if (projectSessionView is null) return;
+        projectSessionView.Refresh();
+        UpdateProjectSessionSummary();
+    }
+
+    private bool ProjectSessionFilter(object value)
+    {
+        if (value is not ProjectSessionGroupRow group) return false;
+        var search = ProjectSessionSearchBox?.Text?.Trim() ?? "";
+        if (search.Length > 0 && !group.SearchText.Contains(search, StringComparison.OrdinalIgnoreCase)) return false;
+        return ProjectSessionFilterBox?.SelectedIndex switch
+        {
+            1 => group.ActiveCount > 0,
+            2 => group.ArchivedCount > 0,
+            3 => group.UnknownCount > 0,
+            4 => group.ProblemCount > 0,
+            5 => group.SelectedCount > 0,
+            _ => true
+        };
+    }
+
+    private void SessionViewModeChanged(object sender, RoutedEventArgs e)
+    {
+        if (ProjectSessionSelectionPanel is null || IndividualSessionSelectionPanel is null || ProjectSessionViewRadio is null) return;
+        var projectView = ProjectSessionViewRadio.IsChecked == true;
+        ProjectSessionSelectionPanel.Visibility = projectView ? Visibility.Visible : Visibility.Collapsed;
+        IndividualSessionSelectionPanel.Visibility = projectView ? Visibility.Collapsed : Visibility.Visible;
     }
 
     private bool SessionFilter(object value)
@@ -211,6 +247,24 @@ public partial class MainWindow : Window
         SetSessionSelection([row], checkBox.IsChecked == true);
     }
 
+    private void ProjectSessionSelection_Click(object sender, RoutedEventArgs e)
+    {
+        if (syncingSelection || sender is not CheckBox { DataContext: ProjectSessionGroupRow group }) return;
+        SetSessionSelection(group.Rows, group.SelectionState != true);
+    }
+
+    private void SelectVisibleProjectSessions_Click(object sender, RoutedEventArgs e) => SetVisibleProjectSessions(true);
+    private void ClearVisibleProjectSessions_Click(object sender, RoutedEventArgs e) => SetVisibleProjectSessions(false);
+
+    private void SetVisibleProjectSessions(bool selected)
+    {
+        var rows = projectSessionView.Cast<object>().OfType<ProjectSessionGroupRow>()
+            .SelectMany(group => group.Rows)
+            .DistinctBy(row => row.Id, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+        SetSessionSelection(rows, selected);
+    }
+
     private void SourceSelection_Click(object sender, RoutedEventArgs e)
     {
         if (syncingSelection || sender is not CheckBox { DataContext: SourceItem item } checkBox) return;
@@ -275,6 +329,23 @@ public partial class MainWindow : Window
             pathReplacements);
     }
 
+    private void RebuildProjectSessionGroups()
+    {
+        projectSessionGroups.Clear();
+        var problems = sessionRows.Where(row => row.HasMissingLink).Select(row => row.Id).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var groups = SessionProjectGrouping.Create(sessionRows.SelectMany(row => row.References), problems);
+        foreach (var group in ProjectSessionGroupRow.Create(groups, sessionRowsById)) projectSessionGroups.Add(group);
+        projectSessionView.Refresh();
+        UpdateProjectSessionSummary();
+    }
+
+    private void RefreshProjectSessionGroups()
+    {
+        foreach (var group in projectSessionGroups) group.Refresh();
+        if (ProjectSessionFilterBox?.SelectedIndex == 5) projectSessionView.Refresh();
+        UpdateProjectSessionSummary();
+    }
+
     private void ReconcileSessionsAfterSourceChange()
     {
         if (selectionCoordinator is null) return;
@@ -299,6 +370,7 @@ public partial class MainWindow : Window
     {
         if (SourceFilterBox?.SelectedIndex == 2) sourcesView.Refresh();
         if (SessionFilterBox?.SelectedIndex == 6) sessionView.Refresh();
+        RefreshProjectSessionGroups();
         UpdateSourceSummary();
         UpdateSessionSummary();
         UpdateTabHeaders();
@@ -326,6 +398,13 @@ public partial class MainWindow : Window
         var visible = sessionView.Cast<object>().OfType<SessionGroupRow>().ToList();
         SessionSummaryText.Text = $"显示 {visible.Count} / {sessionRows.Count} 个独立会话；已选择 {sessionRows.Count(x => x.Selected)} 个；活动 {sessionRows.Count(x => x.IsActive)}，归档 {sessionRows.Count(x => x.IsArchived)}，状态未知 {sessionRows.Count(x => x.HasUnknownLifecycle)}。"
             + (sessionRows.Any(x => x.HasArchivedResidue) ? " 紫色提示表示归档会话仍保留项目文件。" : "");
+    }
+
+    private void UpdateProjectSessionSummary()
+    {
+        if (ProjectSessionSummaryText is null || projectSessionView is null) return;
+        var visible = projectSessionView.Cast<object>().OfType<ProjectSessionGroupRow>().ToList();
+        ProjectSessionSummaryText.Text = $"显示 {visible.Count} / {projectSessionGroups.Count} 个项目目录；已选 {sessionRows.Count(row => row.Selected)} / {sessionRows.Count} 个会话。勾选项目可一次选择目录下全部会话，半选表示只选了其中一部分。";
     }
 
     private void UpdateCleanupSummary()
@@ -431,6 +510,7 @@ public partial class MainWindow : Window
             sessionRows.Clear();
             foreach (var group in SessionGroupRow.Create(scan.Sessions)) sessionRows.Add(group);
             RebuildSelectionCoordinator();
+            RebuildProjectSessionGroups();
             cleanupCandidates.Clear();
             foreach (var candidate in discoveredCleanup) cleanupCandidates.Add(candidate);
             UpdateCleanupSummary();
@@ -928,12 +1008,16 @@ public partial class MainWindow : Window
 public sealed class SessionGroupRow : INotifyPropertyChanged
 {
     private bool selected;
+    private readonly bool hasMissingLink;
+    private readonly bool hasArchivedResidue;
 
     private SessionGroupRow(string id, IReadOnlyList<SessionReference> references)
     {
         Id = id;
         References = references;
         selected = references.All(reference => reference.Selected);
+        hasMissingLink = references.Any(reference => reference.HasMissingProject || reference.HasMissingTranscript);
+        hasArchivedResidue = references.Any(reference => reference.HasProjectResidue);
     }
 
     public event PropertyChangedEventHandler? PropertyChanged;
@@ -944,11 +1028,12 @@ public sealed class SessionGroupRow : INotifyPropertyChanged
     public string TranscriptPath => JoinPaths(References.Select(reference => reference.TranscriptPath));
     public int AssociationCount => References.Count;
     public DateTimeOffset? LastActivityUtc => References.Max(reference => reference.LastActivityUtc);
+    public string LastActivityText => LastActivityUtc?.ToLocalTime().ToString("yyyy-MM-dd HH:mm") ?? "时间未知";
     public bool IsActive => References.Any(reference => reference.Lifecycle == SessionLifecycle.Active);
     public bool IsArchived => !IsActive && References.Any(reference => reference.Lifecycle == SessionLifecycle.Archived);
     public bool HasUnknownLifecycle => References.Any(reference => reference.Lifecycle == SessionLifecycle.Unknown) || IsActive && IsArchived;
-    public bool HasMissingLink => References.Any(reference => reference.HasMissingProject || reference.HasMissingTranscript);
-    public bool HasArchivedResidue => References.Any(reference => reference.HasProjectResidue);
+    public bool HasMissingLink => hasMissingLink;
+    public bool HasArchivedResidue => hasArchivedResidue;
     public string LifecycleText => IsActive && IsArchived ? "活动 + 归档" : IsActive ? "活动目录" : IsArchived ? "已归档" : "状态未知";
     public string StatusText => HasMissingLink ? "缺少关联文件" : HasArchivedResidue ? "归档会话仍保留项目" : "关联完整";
     public string LinkText => HasMissingLink ? "请补齐项目或对话文件" : HasArchivedResidue ? "项目文件仍在本机，可一并保存" : "会话与项目已关联";
@@ -975,6 +1060,70 @@ public sealed class SessionGroupRow : INotifyPropertyChanged
     {
         var values = paths.Where(path => !string.IsNullOrWhiteSpace(path)).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
         return values.Count <= 2 ? string.Join("\n", values) : string.Join("\n", values.Take(2)) + $"\n（另有 {values.Count - 2} 个位置）";
+    }
+}
+
+public sealed class ProjectSessionGroupRow : INotifyPropertyChanged
+{
+    private ProjectSessionGroupRow(SessionProjectGroup group, IReadOnlyList<SessionGroupRow> rows)
+    {
+        Group = group;
+        Rows = rows;
+        SearchText = string.Join(" ", group.Name, group.ProjectPath, rows.Select(row => row.Title));
+    }
+
+    public event PropertyChangedEventHandler? PropertyChanged;
+    public SessionProjectGroup Group { get; }
+    public IReadOnlyList<SessionGroupRow> Rows { get; }
+    public string Key => Group.Key;
+    public string Name => Group.Name;
+    public string ProjectPath => string.IsNullOrWhiteSpace(Group.ProjectPath) ? "没有识别到项目目录，请展开后核对会话" : Group.ProjectPath;
+    public string SearchText { get; }
+    public DateTimeOffset? LastActivityUtc => Group.LastActivityUtc;
+    public string LastActivityText => LastActivityUtc?.ToLocalTime().ToString("yyyy-MM-dd HH:mm") ?? "时间未知";
+    public int SessionCount => Rows.Count;
+    public int SelectedCount => Rows.Count(row => row.Selected);
+    public int ActiveCount => Group.ActiveCount;
+    public int ArchivedCount => Group.ArchivedCount;
+    public int UnknownCount => Group.UnknownCount;
+    public int ProblemCount => Rows.Count(row => row.HasMissingLink);
+    public bool? SelectionState => SelectedCount == 0 ? false : SelectedCount == SessionCount ? true : null;
+    public string CountText => $"已选 {SelectedCount} / {SessionCount}";
+    public string SummaryText
+    {
+        get
+        {
+            var parts = new List<string>();
+            if (ActiveCount > 0) parts.Add($"活动 {ActiveCount}");
+            if (ArchivedCount > 0) parts.Add($"归档 {ArchivedCount}");
+            if (UnknownCount > 0) parts.Add($"未知 {UnknownCount}");
+            if (ProblemCount > 0) parts.Add($"需处理 {ProblemCount}");
+            return string.Join(" · ", parts);
+        }
+    }
+    public string StatusText => ProblemCount > 0 ? "存在缺少项目或对话文件的会话" : Key == SessionProjectGrouping.UnassignedKey ? "没有识别到项目目录" : "目录关联完整";
+    public Brush StatusBrush => ProblemCount > 0 ? Brushes.Firebrick : Key == SessionProjectGrouping.UnassignedKey ? Brushes.DarkGoldenrod : Brushes.ForestGreen;
+
+    public void Refresh()
+    {
+        PropertyChanged?.Invoke(this, new(nameof(SelectedCount)));
+        PropertyChanged?.Invoke(this, new(nameof(SelectionState)));
+        PropertyChanged?.Invoke(this, new(nameof(CountText)));
+        PropertyChanged?.Invoke(this, new(nameof(SummaryText)));
+        PropertyChanged?.Invoke(this, new(nameof(ProblemCount)));
+        PropertyChanged?.Invoke(this, new(nameof(StatusText)));
+        PropertyChanged?.Invoke(this, new(nameof(StatusBrush)));
+    }
+
+    public static IEnumerable<ProjectSessionGroupRow> Create(
+        IReadOnlyList<SessionProjectGroup> groups,
+        IReadOnlyDictionary<string, SessionGroupRow> rowsById)
+    {
+        foreach (var group in groups)
+        {
+            var rows = group.SessionIds.Select(id => rowsById.GetValueOrDefault(id)).Where(row => row is not null).Cast<SessionGroupRow>().ToList();
+            if (rows.Count > 0) yield return new(group, rows);
+        }
     }
 }
 

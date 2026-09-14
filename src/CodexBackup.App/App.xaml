@@ -169,6 +169,29 @@
       <Setter Property="Cursor" Value="Hand" />
       <Setter Property="Focusable" Value="False" />
     </Style>
+    <Style x:Key="SessionViewRadioButton" TargetType="RadioButton">
+      <Setter Property="Padding" Value="14,8" />
+      <Setter Property="Margin" Value="0,0,8,0" />
+      <Setter Property="Foreground" Value="{StaticResource Muted}" />
+      <Setter Property="FontWeight" Value="SemiBold" />
+      <Setter Property="Cursor" Value="Hand" />
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="RadioButton">
+            <Border x:Name="ModeBorder" Background="#F1F5F6" BorderBrush="{StaticResource Line}" BorderThickness="1" CornerRadius="7" Padding="{TemplateBinding Padding}">
+              <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" />
+            </Border>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsChecked" Value="True">
+                <Setter TargetName="ModeBorder" Property="Background" Value="{StaticResource Teal}" />
+                <Setter TargetName="ModeBorder" Property="BorderBrush" Value="{StaticResource Teal}" />
+                <Setter Property="Foreground" Value="White" />
+              </Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
 
     <Style TargetType="GroupBox">
       <Setter Property="Padding" Value="14" />

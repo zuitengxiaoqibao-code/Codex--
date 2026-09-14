@@ -28,7 +28,7 @@ public partial class App : Application
             try
             {
                 window.Show(); window.UpdateLayout();
-                var expected = new[] { "WelcomePage", "HomePage", "BackupPage", "RestorePage", "CheckPage", "BusyPanel", "ResultPage", "AdvancedScanExpander", "AdvancedBackupExpander", "ManualSelectionExpander", "RecommendedSelectionSummaryText", "OfficialAuditSummaryText", "BackupContentTabs", "SourceSelectionPanel", "SessionSelectionPanel", "CleanupSelectionPanel", "SourcesGrid", "SourceFilterBox", "SourceSearchBox", "SessionsGrid", "SessionFilterBox", "SessionSearchBox", "CleanupGrid", "RunCleanupButton", "BackupFindingsList", "SourceSummaryText", "SessionSummaryText", "CleanupSummaryText" };
+                var expected = new[] { "WelcomePage", "HomePage", "BackupPage", "RestorePage", "CheckPage", "BusyPanel", "ResultPage", "AdvancedScanExpander", "AdvancedBackupExpander", "ManualSelectionExpander", "RecommendedSelectionSummaryText", "OfficialAuditSummaryText", "BackupContentTabs", "SourceSelectionPanel", "SessionSelectionPanel", "ProjectSessionSelectionPanel", "ProjectSessionGroupsList", "ProjectSessionFilterBox", "ProjectSessionSearchBox", "IndividualSessionSelectionPanel", "CleanupSelectionPanel", "SourcesGrid", "SourceFilterBox", "SourceSearchBox", "SessionsGrid", "SessionFilterBox", "SessionSearchBox", "CleanupGrid", "RunCleanupButton", "BackupFindingsList", "SourceSummaryText", "SessionSummaryText", "CleanupSummaryText" };
                 var missing = expected.Where(name => window.FindName(name) is null).ToArray();
                 var advancedSectionsCollapsed = new[] { "AdvancedScanExpander", "AdvancedBackupExpander", "ManualSelectionExpander" }
                     .All(name => window.FindName(name) is Expander { IsExpanded: false });
@@ -55,6 +55,8 @@ public partial class App : Application
                 Click("WelcomeContinue_Click", "HomePage");
                 Click("OpenBackup_Click", "BackupPage");
                 window.UpdateLayout();
+                var projectSessionViewDefault = window.FindName("ProjectSessionSelectionPanel") is FrameworkElement { Visibility: Visibility.Visible }
+                    && window.FindName("IndividualSessionSelectionPanel") is FrameworkElement { Visibility: Visibility.Collapsed };
                 try
                 {
                     var bitmap = new RenderTargetBitmap((int)window.ActualWidth, (int)window.ActualHeight, 96, 96, PixelFormats.Pbgra32);
@@ -91,6 +93,9 @@ public partial class App : Application
                     ]
                 });
                 typeof(MainWindow).GetMethod("RebuildSelectionCoordinator", bindingFlags)!.Invoke(window, null);
+                typeof(MainWindow).GetMethod("RebuildProjectSessionGroups", bindingFlags)!.Invoke(window, null);
+                var projectGroups = (ObservableCollection<ProjectSessionGroupRow>)typeof(MainWindow).GetField("projectSessionGroups", bindingFlags)!.GetValue(window)!;
+                var projectGroupingValid = projectGroups.Count == 1 && projectGroups[0].SessionCount == 1000 && projectGroups[0].SelectionState == true;
                 typeof(MainWindow).GetMethod("UpdateSimpleSummaries", bindingFlags)!.Invoke(window, null);
                 var simpleSummaryValid = ((TextBlock)window.FindName("RecommendedSelectionSummaryText")).Text.Contains("1000 / 1000", StringComparison.Ordinal)
                     && ((TextBlock)window.FindName("OfficialAuditSummaryText")).Text.Contains("已不支持 1 项", StringComparison.Ordinal)
@@ -101,6 +106,13 @@ public partial class App : Application
                 var coverageCounter = typeof(MainWindow).GetField("coverageEvaluationCount", bindingFlags)!;
                 var allRows = sessionItems.ToList();
                 var coverageBeforeSelection = (int)coverageCounter.GetValue(window)!;
+                var projectSelectionClick = typeof(MainWindow).GetMethod("ProjectSessionSelection_Click", bindingFlags)!;
+                var projectTimer = Stopwatch.StartNew();
+                var projectCheckBox = new CheckBox { DataContext = projectGroups[0], IsChecked = true };
+                projectSelectionClick.Invoke(window, [projectCheckBox, new RoutedEventArgs()]);
+                projectCheckBox.IsChecked = false;
+                projectSelectionClick.Invoke(window, [projectCheckBox, new RoutedEventArgs()]);
+                projectTimer.Stop();
                 var batchTimer = Stopwatch.StartNew();
                 setSelection.Invoke(window, [allRows, false, true]);
                 setSelection.Invoke(window, [allRows, true, true]);
@@ -122,12 +134,13 @@ public partial class App : Application
                 await window.Dispatcher.InvokeAsync(() => { }, System.Windows.Threading.DispatcherPriority.ApplicationIdle);
                 sourceTimer.Stop();
                 var selectionResponsive = batchTimer.Elapsed < TimeSpan.FromSeconds(2)
+                    && projectTimer.Elapsed < TimeSpan.FromSeconds(2)
                     && singleTimer.Elapsed < TimeSpan.FromMilliseconds(500)
                     && sourceTimer.Elapsed < TimeSpan.FromSeconds(1);
                 var selectionScheduledCoverage = (int)coverageCounter.GetValue(window)! != coverageBeforeSelection;
                 try
                 {
-                    ((FrameworkElement)window.FindName("SessionsGrid")).BringIntoView();
+                    ((FrameworkElement)window.FindName("ProjectSessionGroupsList")).BringIntoView();
                     window.UpdateLayout();
                     var bitmap = new RenderTargetBitmap((int)window.ActualWidth, (int)window.ActualHeight, 96, 96, PixelFormats.Pbgra32);
                     bitmap.Render(window); var encoder = new PngBitmapEncoder(); encoder.Frames.Add(BitmapFrame.Create(bitmap));
@@ -140,9 +153,9 @@ public partial class App : Application
                 Click("OpenRestore_Click", "RestorePage");
                 Click("BackHome_Click", "HomePage");
                 Click("OpenCheck_Click", "CheckPage");
-                var report = new { initialized = true, namedControlsValid = missing.Length == 0, advancedSectionsCollapsed, simpleSummaryValid, missing, screenshot, backupScreenshot, manualScreenshot, navigation, selectionResponsive, selectionScheduledCoverage, selectionStress = new { sessions = 1000, batchMilliseconds = batchTimer.Elapsed.TotalMilliseconds, singleMilliseconds = singleTimer.Elapsed.TotalMilliseconds, sharedSourceMilliseconds = sourceTimer.Elapsed.TotalMilliseconds }, limitation = "验证窗口、静态渲染、入口导航和千条会话选择响应；不代替文件选择对话框、完整向导及新系统人工验收。" };
+                var report = new { initialized = true, namedControlsValid = missing.Length == 0, advancedSectionsCollapsed, projectSessionViewDefault, projectGroupingValid, simpleSummaryValid, missing, screenshot, backupScreenshot, manualScreenshot, navigation, selectionResponsive, selectionScheduledCoverage, selectionStress = new { sessions = 1000, projectGroupMilliseconds = projectTimer.Elapsed.TotalMilliseconds, batchMilliseconds = batchTimer.Elapsed.TotalMilliseconds, singleMilliseconds = singleTimer.Elapsed.TotalMilliseconds, sharedSourceMilliseconds = sourceTimer.Elapsed.TotalMilliseconds }, limitation = "验证窗口、静态渲染、入口导航、项目目录分组和千条会话选择响应；不代替文件选择对话框、完整向导及新系统人工验收。" };
                 File.WriteAllText(output, JsonSerializer.Serialize(report, new JsonSerializerOptions { WriteIndented = true }));
-                Shutdown(missing.Length == 0 && advancedSectionsCollapsed && simpleSummaryValid && selectionResponsive && !selectionScheduledCoverage ? 0 : 2);
+                Shutdown(missing.Length == 0 && advancedSectionsCollapsed && projectSessionViewDefault && projectGroupingValid && simpleSummaryValid && selectionResponsive && !selectionScheduledCoverage ? 0 : 2);
             }
             catch (Exception ex)
             {
