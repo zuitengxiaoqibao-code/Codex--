@@ -63,9 +63,9 @@ public static class RestorePlanner
         if (cores.Count == 0) return;
         var primary = request.PrimaryCoreRootId;
         if (cores.Count > 1 && string.IsNullOrWhiteSpace(primary))
-            throw new BackupException("备份包含多套 Codex 数据，请明确选择一套作为当前系统的主 Core；其他 Core 将单独保存，不会合并。");
+            throw new BackupException("备份包含多套 Codex 会话数据，请明确选择一套作为当前系统的主目录；其他目录将单独保存，不会合并。");
         if (!string.IsNullOrWhiteSpace(primary) && cores.All(r => !r.Id.Equals(primary, StringComparison.Ordinal)))
-            throw new BackupException("选择的主 Core 不在备份清单中，请重新选择。");
+            throw new BackupException("选择的主会话数据目录不在备份清单中，请重新选择。");
         if (!request.Isolated)
         {
             var source = manifest.SourceCodexVersion?.Trim();

@@ -127,7 +127,7 @@ public sealed class DiscoveryService
             return;
         }
         if (scannedCoreRoots.Count > 32) { findings.Add(new(FindingLevel.Blocker, "configured-core-limit", "配置引用的 Codex 数据目录超过 32 个，后续目录未检测。", full)); return; }
-        var core = Add("Codex 会话、配置与核心数据", full, SourceKind.Core, explicitlyRequired, evidence);
+        var core = Add("Codex 会话主数据（会话索引、正文与个人设置）", full, SourceKind.Core, explicitlyRequired, evidence);
         if (!core.Exists)
         {
             if (explicitlyRequired) findings.Add(new(FindingLevel.Blocker, "required-codex-root-missing", "显式配置的 Codex 数据目录不存在或不可访问，请核对配置。", core.Path));
@@ -140,7 +140,7 @@ public sealed class DiscoveryService
     {
         var cores = items.Where(x => x.Kind == SourceKind.Core).ToList();
         var existing = cores.Where(x => x.Exists).ToList();
-        foreach (var core in existing) { core.Required = true; core.Selected = true; core.Reason = "Codex 核心数据，完整迁移必须保留。"; }
+        foreach (var core in existing) { core.Required = true; core.Selected = true; core.Reason = "Codex 会话主数据，完整迁移必须保留；可重建的顶层日志、缓存、临时运行状态和登录令牌会自动排除。"; }
         if (existing.Count > 0) return;
         var fallback = cores.First(x => Paths.Equals(x.Path, defaultCorePath));
         fallback.Required = true; fallback.Selected = true; fallback.Reason = "未发现其他有效 Codex 数据目录，默认目录必须核查。";

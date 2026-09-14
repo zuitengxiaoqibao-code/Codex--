@@ -45,7 +45,45 @@ public class PackageTests
         // Root normalization is exercised separately to avoid live-process checks on the synthetic Core.
         var roots = BackupEngine.NormalizeRoots([parent, child]);
         var records = BackupEngine.Snapshot(roots, [], CancellationToken.None);
+        Assert.Equal(SourceKind.Project, Assert.Single(roots).Kind);
         Assert.Contains(records, f => f.RelativePath == "tmp\\precious.txt");
+    }
+
+    [Fact] public void CoreSnapshotKeepsPersonalDataAndSkipsRebuildableOrCredentialState()
+    {
+        using var t = new TestTree();
+        t.Write("core/sessions/a.jsonl", "conversation");
+        t.Write("core/state_5.sqlite", "session index");
+        t.Write("core/thread_history_1.sqlite", "conversation history");
+        t.Write("core/config.toml", "personal config");
+        t.Write("core/skills/mine/SKILL.md", "skill");
+        t.Write("core/logs_2.sqlite", "rebuildable log");
+        t.Write("core/logs_2.sqlite-wal", "rebuildable log journal");
+        t.Write("core/cache/download.bin", "cache");
+        t.Write("core/tmp/lock", "temporary state");
+        t.Write("core/auth.json", "credential");
+        t.Write("core/.sandbox-secrets/token", "credential");
+        t.Write("core/worktrees/project/logs_2.sqlite", "project source with a similar name");
+
+        var core = t.Source("core"); core.Kind = SourceKind.Core;
+        var records = BackupEngine.Snapshot(BackupEngine.NormalizeRoots([core]), [], CancellationToken.None);
+        var paths = records.Select(record => record.RelativePath).ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+        Assert.Contains("sessions\\a.jsonl", paths);
+        Assert.Contains("state_5.sqlite", paths);
+        Assert.Contains("thread_history_1.sqlite", paths);
+        Assert.Contains("config.toml", paths);
+        Assert.Contains("skills\\mine\\SKILL.md", paths);
+        Assert.Contains("worktrees\\project\\logs_2.sqlite", paths);
+        Assert.DoesNotContain("logs_2.sqlite", paths);
+        Assert.DoesNotContain("logs_2.sqlite-wal", paths);
+        Assert.DoesNotContain("cache", paths);
+        Assert.DoesNotContain("cache\\download.bin", paths);
+        Assert.DoesNotContain("tmp", paths);
+        Assert.DoesNotContain("tmp\\lock", paths);
+        Assert.DoesNotContain("auth.json", paths);
+        Assert.DoesNotContain(".sandbox-secrets", paths);
+        Assert.DoesNotContain(".sandbox-secrets\\token", paths);
     }
 
     [Fact] public void DirectoryAlternateDataStreamsMustNotBeSilentlyLost()

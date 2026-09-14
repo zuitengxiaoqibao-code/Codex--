@@ -2,6 +2,17 @@ namespace CodexBackup.Core;
 
 public static class BackupScopePolicy
 {
+    private static readonly HashSet<string> RebuildableCoreDirectories = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ".sandbox", ".sandbox-bin", ".sandbox-secrets", ".tmp", "cache", "logs",
+        "mcp-oauth-locks", "process_manager", "thread-writer-locks", "tmp"
+    };
+
+    private static readonly HashSet<string> RebuildableOrCredentialCoreFiles = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ".codex-tools-cache.json", "auth.json", "cap_sid", "installation_id", "models_cache.json"
+    };
+
     public static bool SelectByDefault(SourceItem source, bool discoveredAsRequired) =>
         MustPreserve(source, discoveredAsRequired) || source.Exists && source.Kind != SourceKind.Application && !IsRebuildableLogOrCache(source);
 
@@ -56,5 +67,19 @@ public static class BackupScopePolicy
             || text.Contains("logs_", StringComparison.OrdinalIgnoreCase)
             || text.Contains("cache", StringComparison.OrdinalIgnoreCase)
             || text.Contains("temp", StringComparison.OrdinalIgnoreCase);
+    }
+
+    public static bool ExcludeFromPersonalDataRoot(string relativePath)
+    {
+        if (string.IsNullOrWhiteSpace(relativePath)) return false;
+        var normalized = relativePath.Replace(Path.AltDirectorySeparatorChar, Path.DirectorySeparatorChar);
+        var separator = normalized.IndexOf(Path.DirectorySeparatorChar);
+        var topLevelName = separator < 0 ? normalized : normalized[..separator];
+        if (RebuildableCoreDirectories.Contains(topLevelName)) return true;
+        if (separator >= 0) return false;
+        if (RebuildableOrCredentialCoreFiles.Contains(topLevelName)) return true;
+        return topLevelName.StartsWith("logs_", StringComparison.OrdinalIgnoreCase)
+            && (topLevelName.Contains(".sqlite", StringComparison.OrdinalIgnoreCase)
+                || topLevelName.Contains(".db", StringComparison.OrdinalIgnoreCase));
     }
 }

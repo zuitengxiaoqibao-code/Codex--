@@ -25,7 +25,7 @@ public static class CleanupService
             var project = SafeCanonical(session.ProjectPath);
             if (project is null || !Directory.Exists(project)) continue;
             var shared = activeProjects.Any(active => SafeContains(project, active) || SafeContains(active, project));
-            if (HasProjectIdentity(project))
+            if (!IsProtectedProjectRoot(project))
             {
                 if (!candidates.TryGetValue(project, out var wholeProject))
                 {
@@ -99,7 +99,7 @@ public static class CleanupService
                 var project = PathSafety.Full(candidate.ProjectPath);
                 var relative = Path.GetRelativePath(project, source);
                 var validGenerated = candidate.Kind == CleanupCandidateKind.GeneratedContent && !string.IsNullOrWhiteSpace(relative) && relative != "." && !relative.Contains(Path.DirectorySeparatorChar) && !relative.Contains(Path.AltDirectorySeparatorChar) && GeneratedDirectories.Contains(Path.GetFileName(source)) && PathSafety.Contains(project, source);
-                var validProject = candidate.Kind == CleanupCandidateKind.ArchivedProject && PathsEqual(source, project) && HasProjectIdentity(source);
+                var validProject = candidate.Kind == CleanupCandidateKind.ArchivedProject && PathsEqual(source, project) && !IsProtectedProjectRoot(source);
                 if (!validGenerated && !validProject) throw new BackupException("清理候选不符合归档项目或可重建目录边界，已拒绝隔离。");
                 if (!Directory.Exists(source) && !File.Exists(source)) continue;
                 var quarantineRoot = Path.Combine(Path.GetDirectoryName(project)!, ".codex-backup-quarantine", DateTime.UtcNow.ToString("yyyyMMdd-HHmmss"));
@@ -134,7 +134,7 @@ public static class CleanupService
             var quarantined = PathSafety.Full(entry.QuarantinePath);
             var relative = Path.GetRelativePath(project, original);
             var validGenerated = entry.Kind == CleanupCandidateKind.GeneratedContent && !string.IsNullOrWhiteSpace(relative) && relative != "." && !relative.Contains(Path.DirectorySeparatorChar) && !relative.Contains(Path.AltDirectorySeparatorChar) && GeneratedDirectories.Contains(Path.GetFileName(original));
-            var validProject = entry.Kind == CleanupCandidateKind.ArchivedProject && PathsEqual(original, project) && HasProjectIdentity(quarantined);
+            var validProject = entry.Kind == CleanupCandidateKind.ArchivedProject && PathsEqual(original, project) && !IsProtectedProjectRoot(original);
             if ((!validGenerated && !validProject)
                 || !quarantined.Contains(Path.DirectorySeparatorChar + ".codex-backup-quarantine" + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
                 throw new BackupException("隔离日志包含不受支持的路径，已停止还原。");
@@ -184,33 +184,23 @@ public static class CleanupService
 
     private static bool PathsEqual(string left, string right) => string.Equals(MigrationCoverage.Canonical(left), MigrationCoverage.Canonical(right), StringComparison.OrdinalIgnoreCase);
 
-    private static bool HasProjectIdentity(string project)
+    private static bool IsProtectedProjectRoot(string project)
     {
         try
         {
-            if (!Directory.Exists(project) || IsProtectedProjectRoot(project)) return false;
-            if (Directory.Exists(Path.Combine(project, ".git")) || File.Exists(Path.Combine(project, ".git"))) return true;
-            foreach (var marker in new[] { "package.json", "pyproject.toml", "Cargo.toml", "go.mod", "pom.xml", "build.gradle", "CMakeLists.txt" })
-                if (File.Exists(Path.Combine(project, marker))) return true;
-            return Directory.EnumerateFiles(project, "*.sln", SearchOption.TopDirectoryOnly).Any()
-                || Directory.EnumerateFiles(project, "*.csproj", SearchOption.TopDirectoryOnly).Any();
+            var full = PathSafety.Full(project);
+            if (string.Equals(full, Path.GetPathRoot(full), StringComparison.OrdinalIgnoreCase)) return true;
+            try { PathSafety.RejectSystemTarget(full); } catch (BackupException) { return true; }
+            foreach (var protectedPath in new[]
+            {
+                Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory),
+                Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments),
+                Environment.GetFolderPath(Environment.SpecialFolder.UserProfile)
+            })
+                if (!string.IsNullOrWhiteSpace(protectedPath) && PathsEqual(full, protectedPath)) return true;
+            return false;
         }
-        catch { return false; }
-    }
-
-    private static bool IsProtectedProjectRoot(string project)
-    {
-        var full = PathSafety.Full(project);
-        if (string.Equals(full, Path.GetPathRoot(full), StringComparison.OrdinalIgnoreCase)) return true;
-        try { PathSafety.RejectSystemTarget(full); } catch (BackupException) { return true; }
-        foreach (var protectedPath in new[]
-        {
-            Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory),
-            Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments),
-            Environment.GetFolderPath(Environment.SpecialFolder.UserProfile)
-        })
-            if (!string.IsNullOrWhiteSpace(protectedPath) && PathsEqual(full, protectedPath)) return true;
-        return false;
+        catch (Exception ex) when (ex is BackupException or ArgumentException or IOException or UnauthorizedAccessException) { return true; }
     }
 
     private sealed class CleanupJournal

@@ -323,7 +323,7 @@ public partial class MainWindow : Window
         var ready = cleanupCandidates.Count(candidate => candidate.Selected && candidate.CanQuarantine);
         var projects = cleanupCandidates.Count(candidate => candidate.ContainsSource);
         var generated = cleanupCandidates.Count - projects;
-        CleanupSummaryText.Text = $"发现 {projects} 个完整归档项目和 {generated} 个可重建目录；可安排 {safe} 个，活动会话仍在使用 {blocked} 个，已安排 {selected} 个，其中 {ready} 个已随本次备份校验。项目根目录属于红色高风险项，必须逐项选择；会话、Core 数据库和记忆不会成为清理候选。";
+        CleanupSummaryText.Text = $"发现 {projects} 个完整归档项目和 {generated} 个可重建目录；可安排 {safe} 个，活动会话仍在使用 {blocked} 个，已安排 {selected} 个，其中 {ready} 个已随本次备份校验。项目根目录属于红色高风险项，必须逐项选择；会话主数据和记忆库不会成为清理候选。";
         if (RunCleanupButton is not null) RunCleanupButton.IsEnabled = !string.IsNullOrWhiteSpace(lastVerifiedBackupPath) && ready > 0;
         UpdateTabHeaders();
     }
@@ -339,7 +339,7 @@ public partial class MainWindow : Window
         SessionsTab.Header = $"会话 {sessionRows.Count(row => row.Selected)}/{sessionRows.Count}";
         ProjectsTab.Header = "项目 " + Count(sources.Where(item => item.Kind == SourceKind.Project));
         MemoriesTab.Header = "记忆 " + Count(sources.Where(item => item.Kind == SourceKind.Memory));
-        PersonalDataTab.Header = "配置 " + Count(sources.Where(item => item.Kind is SourceKind.Core or SourceKind.Session or SourceKind.Environment));
+        PersonalDataTab.Header = "会话数据/配置 " + Count(sources.Where(item => item.Kind is SourceKind.Core or SourceKind.Session or SourceKind.Environment));
         SkillsTab.Header = "技能 " + Count(sources.Where(item => item.Kind == SourceKind.Skill));
         ToolsTab.Header = "插件工具 " + Count(sources.Where(item => item.Kind is SourceKind.Plugin or SourceKind.Tool));
         OtherTab.Header = "其他 " + Count(sources.Where(item => item.Kind is SourceKind.Application or SourceKind.Custom));
@@ -365,7 +365,7 @@ public partial class MainWindow : Window
             var overlap = sources.Where(s => s.Selected && s.Exists).Any(s => WindowsEnvironment.GetDiskNumbers(s.Path).Intersect(targetDisks).Any());
             DestinationInfoText.Text = WindowsEnvironment.DescribeVolume(path) + (targetDisks.Count == 0 ? "。物理磁盘关系未知，请核对外置介质。" : overlap ? "。注意：与至少一个来源共用物理硬盘，不能防护该硬盘损坏。" : "。已识别目标磁盘；请保留独立副本。") + " 加密保护状态未确认。";
         }
-        catch { DestinationInfoText.Text = "无法读取目标卷信息；Core 预检会阻止不支持或空间不足的目标。请自行确认物理介质。"; }
+        catch { DestinationInfoText.Text = "无法读取目标卷信息；备份预检会阻止不支持或空间不足的目标。请自行确认物理介质。"; }
     }
 
     private async void Scan_Click(object sender, RoutedEventArgs e)
@@ -445,7 +445,11 @@ public partial class MainWindow : Window
             if (relocated) item.Selected = false;
             else if (item.Required) item.Selected = true;
             else if (resetOptionalDefaults) item.Selected = BackupScopePolicy.SelectByDefault(item, baseRequired.GetValueOrDefault(item.Id));
-            item.Reason = relocated ? "原位置已搬走，将从指定的新位置保存，并在恢复时重连路径" : item.Required ? "重装后无法自动重建，必须保存" : !item.Exists ? "原文件未找到；可选项不会阻止迁移" : BackupScopePolicy.Explanation(item);
+            item.Reason = relocated ? "原位置已搬走，将从指定的新位置保存，并在恢复时重连路径"
+                : item.Required && item.Kind == SourceKind.Core ? "会话索引、对话正文和个人设置必须保存；程序、顶层日志、缓存、临时运行状态和登录令牌自动排除"
+                : item.Required ? "重装后无法自动重建，必须保存"
+                : !item.Exists ? "原文件未找到；可选项不会阻止迁移"
+                : BackupScopePolicy.Explanation(item);
         }
         RebuildSelectionCoordinator();
         sourcesView.Refresh(); SourcesGrid.Items.Refresh();
@@ -635,7 +639,7 @@ public partial class MainWindow : Window
         if (sender is not RadioButton { DataContext: MappingRow selected }) return;
         foreach (var row in mappings.Where(x => x.Kind == SourceKind.Core)) row.IsPrimary = row == selected;
         MappingsGrid.Items.Refresh();
-        ClearRestorePreview("主 Core 已更改，请重新预演；其他 Core 会保存在独立目录，不会合并数据库。");
+        ClearRestorePreview("主会话数据目录已更改，请重新预演；其他会话数据目录会单独保存，不会合并数据库。");
     }
 
     private void MapCoreToRuntime_Click(object sender, RoutedEventArgs e)
@@ -643,11 +647,11 @@ public partial class MainWindow : Window
         if (verifiedPackage is null) { MessageBox.Show(this, "请先选择并验证备份包。", "缺少备份包"); return; }
         MappingsGrid.CommitEdit(DataGridEditingUnit.Cell, true); MappingsGrid.CommitEdit(DataGridEditingUnit.Row, true);
         var allCore = mappings.Where(x => x.Kind == SourceKind.Core).ToList();
-        if (allCore.Count == 0) { MessageBox.Show(this, "此备份包不含 Codex 核心根。", "没有核心数据"); return; }
+        if (allCore.Count == 0) { MessageBox.Show(this, "此备份包不含 Codex 会话主数据目录。", "没有会话主数据"); return; }
         var selectedCore = allCore.Where(x => x.Selected).ToList();
         if (allCore.Count > 1 && selectedCore.Count != 1)
         {
-            MessageBox.Show(this, "备份包包含多个 Codex 核心根。请在表格中只勾选一个核心根，再执行本机映射。", "需要明确选择", MessageBoxButton.OK, MessageBoxImage.Information);
+            MessageBox.Show(this, "备份包包含多个 Codex 会话数据目录。请在表格中只勾选一个主目录，再执行本机映射。", "需要明确选择", MessageBoxButton.OK, MessageBoxImage.Information);
             return;
         }
         var core = allCore.Count == 1 ? allCore[0] : selectedCore[0];
@@ -1014,7 +1018,7 @@ public sealed class SourceKindChineseConverter : IValueConverter
     public object ConvertBack(object value, Type targetType, object parameter, CultureInfo culture) => Binding.DoNothing;
     public static string ToChinese(SourceKind kind) => kind switch
     {
-        SourceKind.Core => "核心", SourceKind.Project => "项目", SourceKind.Memory => "记忆",
+        SourceKind.Core => "会话主数据", SourceKind.Project => "项目", SourceKind.Memory => "记忆",
         SourceKind.Skill => "技能", SourceKind.Plugin => "插件", SourceKind.Tool => "工具",
         SourceKind.Application => "应用", SourceKind.Environment => "环境", SourceKind.Custom => "自定义", SourceKind.Session => "会话文件",
         _ => "未知"

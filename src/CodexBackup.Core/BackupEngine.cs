@@ -28,6 +28,8 @@ public sealed class BackupEngine
             Exclusions = request.Sources.Where(s => !s.Selected).Select(s => $"未作为独立项目选择（父目录可能包含）：{s.Name} | {s.Path}").ToList(),
             SourceCodexVersion = string.IsNullOrWhiteSpace(request.SourceCodexVersion) ? "未知" : request.SourceCodexVersion,
             EnvironmentManifest = request.EnvironmentManifest ?? new(), Preflight = request.Preflight };
+        manifest.Exclusions.AddRange(manifest.Roots.Where(root => root.Kind == SourceKind.Core)
+            .Select(root => $"自动排除可重建或不应迁移的运行状态：{root.OriginalPath} 下的顶层日志、缓存、临时锁、沙箱运行文件和登录令牌"));
         manifest.CoverageNotes.Add("范围仅限所选来源及已发现依赖；未挂载磁盘、外部服务、系统凭据和未知位置未由此备份保证覆盖。");
         manifest.CoverageNotes.Add("未使用密码加密；备份包含敏感原始配置。硬链接按独立内容副本保存，不保留共享 inode 关系。");
         progress?.Report(new("预检", "枚举文件并检查类型、权限与目标空间"));
@@ -114,7 +116,8 @@ public sealed class BackupEngine
             if (parent is not null)
             {
                 parent.SourceIds.Add(s.Id);
-                if (s.Kind is SourceKind.Core or SourceKind.Application or SourceKind.Tool) parent.Kind = s.Kind;
+                if (parent.OriginalPath.Equals(s.Path, StringComparison.OrdinalIgnoreCase)
+                    && s.Kind is SourceKind.Core or SourceKind.Application or SourceKind.Tool) parent.Kind = s.Kind;
             }
             else roots.Add(new BackupRoot { Id = Guid.NewGuid().ToString("N"), Name = s.Name, OriginalPath = s.Path, IsDirectory = s.IsDirectory, Kind = s.Kind, SourceIds = [s.Id] });
         }
@@ -133,6 +136,7 @@ public sealed class BackupEngine
                 ct.ThrowIfCancellationRequested();
                 var path = stack.Pop();
                 var relative = path == root.OriginalPath ? "" : Path.GetRelativePath(root.OriginalPath, path);
+                if (root.Kind == SourceKind.Core && BackupScopePolicy.ExcludeFromPersonalDataRoot(relative)) continue;
                 if (relative.Length > 0) PathSafety.ValidateRelative(relative);
                 FileIO.ValidateSourceType(path);
                 if (!names.Add(relative)) throw new BackupException("来源存在仅大小写不同的冲突名称，当前格式不能安全迁移。");

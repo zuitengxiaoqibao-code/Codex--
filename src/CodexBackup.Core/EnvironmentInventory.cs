@@ -65,7 +65,7 @@ public static class EnvironmentInventory
             cancellationToken.ThrowIfCancellationRequested();
             var category = item.Kind switch
             {
-                SourceKind.Core => "Codex 核心数据",
+                SourceKind.Core => "Codex 会话主数据",
                 SourceKind.Session => "会话与转录",
                 SourceKind.Memory => "记忆库",
                 SourceKind.Skill => "技能",

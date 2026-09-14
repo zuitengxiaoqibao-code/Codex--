@@ -208,7 +208,7 @@ public sealed class CleanupServiceTests
     }
 
     [Fact]
-    public void WholeArchivedProjectRequiresAProjectIdentityMarker()
+    public void UnmarkedArchivedProjectAppearsAsHighRiskCandidate()
     {
         using var t = new TestTree();
         var folder = t.Dir("ordinary-folder");
@@ -218,7 +218,9 @@ public sealed class CleanupServiceTests
             new SessionReference { Id = "archived", Lifecycle = SessionLifecycle.Archived, ProjectPath = folder }
         ]);
 
-        Assert.DoesNotContain(candidates, candidate => candidate.Kind == CleanupCandidateKind.ArchivedProject);
+        var candidate = Assert.Single(candidates, item => item.Kind == CleanupCandidateKind.ArchivedProject);
+        Assert.True(candidate.ContainsSource);
+        Assert.False(candidate.Selected);
     }
 
     [Fact]
@@ -264,7 +266,7 @@ public sealed class CleanupServiceTests
             new SessionReference { Id = "active", Lifecycle = SessionLifecycle.Active, ProjectPath = project }
         };
 
-        var candidate = Assert.Single(CleanupService.FindCandidates(sessions));
+        var candidate = Assert.Single(CleanupService.FindCandidates(sessions), item => item.Kind == CleanupCandidateKind.GeneratedContent);
         Assert.True(candidate.IsSharedWithActiveSession);
         Assert.False(candidate.SafeToQuarantine);
     }
@@ -277,7 +279,7 @@ public sealed class CleanupServiceTests
         t.Write("project/bin/generated.dll", "generated");
         var candidate = Assert.Single(CleanupService.FindCandidates([
             new SessionReference { Id = "archived", Lifecycle = SessionLifecycle.Archived, ProjectPath = project }
-        ]));
+        ]), item => item.Kind == CleanupCandidateKind.GeneratedContent);
         candidate.Selected = true; candidate.IncludedInVerifiedBackup = true;
 
         var result = await CleanupService.QuarantineAsync([candidate]);
@@ -296,7 +298,7 @@ public sealed class CleanupServiceTests
         t.Write("project/bin/generated.dll", "generated");
         var candidate = Assert.Single(CleanupService.FindCandidates([
             new SessionReference { Id = "archived", Lifecycle = SessionLifecycle.Archived, ProjectPath = project }
-        ]));
+        ]), item => item.Kind == CleanupCandidateKind.GeneratedContent);
         candidate.Selected = true;
 
         var result = await CleanupService.QuarantineAsync([candidate]);

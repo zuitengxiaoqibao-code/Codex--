@@ -26,6 +26,8 @@ internal static class Diagnostics
                     reinstallableApplicationRequired = scan.Items.Count(item => item.Kind == SourceKind.Application && BackupScopePolicy.MustPreserve(item, item.Required)),
                     reinstallableApplicationSelectedByDefault = scan.Items.Count(item => item.Kind == SourceKind.Application && BackupScopePolicy.SelectByDefault(item, item.Required)),
                     cleanupCandidates = cleanup.Count,
+                    archivedProjectCleanupCandidates = cleanup.Count(candidate => candidate.Kind == CleanupCandidateKind.ArchivedProject),
+                    generatedCleanupCandidates = cleanup.Count(candidate => candidate.Kind == CleanupCandidateKind.GeneratedContent),
                     safeCleanupCandidates = cleanup.Count(candidate => candidate.SafeToQuarantine)
                 };
                 report = new { mode, success = true, scan, scope };
