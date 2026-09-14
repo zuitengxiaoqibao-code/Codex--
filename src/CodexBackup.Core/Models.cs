@@ -1,3 +1,5 @@
+using System.ComponentModel;
+
 namespace CodexBackup.Core;
 
 public enum SourceKind { Core, Project, Memory, Skill, Plugin, Tool, Application, Environment, Custom, Session }
@@ -9,14 +11,36 @@ public static class ProductInfo
     public const string Version = "0.3.5-preview";
 }
 
-public sealed class SourceItem
+public sealed class SourceItem : INotifyPropertyChanged
 {
+    private bool required;
+    private bool selected = true;
+
+    public event PropertyChangedEventHandler? PropertyChanged;
     public string Id { get; set; } = Guid.NewGuid().ToString("N");
     public string Name { get; set; } = "";
     public string Path { get; set; } = "";
     public SourceKind Kind { get; set; }
-    public bool Required { get; set; }
-    public bool Selected { get; set; } = true;
+    public bool Required
+    {
+        get => required;
+        set
+        {
+            if (required == value) return;
+            required = value;
+            OnChanged(nameof(Required), nameof(PriorityText), nameof(PriorityRank), nameof(HasProblem));
+        }
+    }
+    public bool Selected
+    {
+        get => selected;
+        set
+        {
+            if (selected == value) return;
+            selected = value;
+            OnChanged(nameof(Selected), nameof(StatusText), nameof(HasProblem));
+        }
+    }
     public bool Exists { get; set; }
     public bool IsDirectory { get; set; } = true;
     public string Reason { get; set; } = "";
@@ -30,6 +54,11 @@ public sealed class SourceItem
     public int PriorityRank => Required ? 0 : Kind is SourceKind.Project or SourceKind.Session or SourceKind.Memory ? 1 : 2;
     public string StatusText => !Exists ? "找不到" : Selected ? "已选择" : "未选择";
     public bool HasProblem => !Exists || (Required && !Selected);
+
+    private void OnChanged(params string[] propertyNames)
+    {
+        foreach (var propertyName in propertyNames) PropertyChanged?.Invoke(this, new(propertyName));
+    }
 }
 
 public sealed class ScanResult

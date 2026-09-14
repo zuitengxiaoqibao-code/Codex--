@@ -2,6 +2,17 @@
   "initialized": true,
   "namedControlsValid": true,
   "missing": [],
-  "screenshot": "C:\\Users\\90090\\Documents\\Codex\\2026-09-11\\xia\\work\\CodexBackup\\docs\\ui-smoke.png",
-  "limitation": "\u4EC5\u9A8C\u8BC1\u7A97\u53E3\u521D\u59CB\u5316\u3001\u547D\u540D\u63A7\u4EF6\u548C\u9759\u6001\u6E32\u67D3\uFF0C\u4E0D\u4EE3\u8868\u4EA4\u4E92\u9A8C\u6536\u3002"
+  "screenshots": [
+    "ui-smoke.png",
+    "ui-smoke-backup.png"
+  ],
+  "selectionResponsive": true,
+  "selectionScheduledCoverage": false,
+  "selectionStress": {
+    "sessions": 1000,
+    "batchMilliseconds": 335.6419,
+    "singleMilliseconds": 4.7843,
+    "sharedSourceMilliseconds": 9.5869
+  },
+  "limitation": "验证窗口、静态渲染、入口导航和千条会话选择响应；不代替文件选择对话框、完整向导及新系统人工验收。"
 }

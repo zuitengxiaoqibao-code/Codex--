@@ -37,8 +37,11 @@ public partial class MainWindow : Window
     private readonly List<string> additionalRoots = [];
     private readonly Dictionary<string,string> pathReplacements = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string,bool> baseRequired = [];
+    private readonly Dictionary<string, SourceItem> sourcesById = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, SessionGroupRow> sessionRowsById = new(StringComparer.OrdinalIgnoreCase);
     private SelectionCoordinator? selectionCoordinator;
     private bool syncingSelection;
+    private int coverageEvaluationCount;
 
     public MainWindow()
     {
@@ -58,11 +61,6 @@ public partial class MainWindow : Window
         MappingsGrid.ItemsSource = mappings;
         ProfilePathBox.Text = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
         BackupDestinationBox.Text = "";
-        SourcesGrid.BeginningEdit += (_, e) => { if (e.Column.DisplayIndex == 0 && e.Row.Item is SourceItem { Required: true }) e.Cancel = true; };
-        SourcesGrid.CellEditEnding += SourcesGrid_CellEditEnding;
-        SessionsGrid.CellEditEnding += SessionsGrid_CellEditEnding;
-        CleanupGrid.BeginningEdit += (_, e) => { if (e.Column.DisplayIndex == 0 && e.Row.Item is CleanupCandidate { SafeToQuarantine: false }) e.Cancel = true; };
-        CleanupGrid.CellEditEnding += (_, _) => Dispatcher.BeginInvoke(DispatcherPriority.DataBind, new Action(UpdateCleanupSummary));
         MappingsGrid.CellEditEnding += (_, _) => { restorePreview = null; previewFingerprint = null; };
         Closing += Window_Closing;
     }
@@ -88,7 +86,6 @@ public partial class MainWindow : Window
     {
         if (sourcesView is null) return;
         sourcesView.Refresh(); UpdateSourceSummary();
-        UpdateSourceSummary();
     }
 
     private bool SourceFilter(object value)
@@ -208,28 +205,45 @@ public partial class MainWindow : Window
         SetSessionSelection(sessionRows.Where(predicate).ToList(), selected);
     }
 
-    private void SessionsGrid_CellEditEnding(object? sender, DataGridCellEditEndingEventArgs e)
+    private void SessionSelection_Click(object sender, RoutedEventArgs e)
     {
-        if (e.Column.DisplayIndex != 0 || e.Row.Item is not SessionGroupRow row) return;
-        Dispatcher.BeginInvoke(DispatcherPriority.DataBind, new Action(() =>
-        {
-            SetSessionSelection([row], row.Selected);
-        }));
+        if (syncingSelection || sender is not CheckBox { DataContext: SessionGroupRow row } checkBox) return;
+        SetSessionSelection([row], checkBox.IsChecked == true);
     }
 
-    private void SourcesGrid_CellEditEnding(object? sender, DataGridCellEditEndingEventArgs e)
+    private void SourceSelection_Click(object sender, RoutedEventArgs e)
     {
-        if (syncingSelection || e.Column.DisplayIndex != 0 || e.Row.Item is not SourceItem item) return;
-        Dispatcher.BeginInvoke(DispatcherPriority.DataBind, new Action(() =>
+        if (syncingSelection || sender is not CheckBox { DataContext: SourceItem item } checkBox) return;
+        if (item.Required)
         {
-            if (item.Required) item.Selected = true;
-            if (!item.Selected)
-            {
-                var related = selectionCoordinator?.SessionsForSource(item.Id) ?? [];
-                SetSessionSelection(sessionRows.Where(row => row.Selected && related.Contains(row.Id, StringComparer.OrdinalIgnoreCase)).ToList(), false, false);
-            }
-            RefreshSelectionUi();
-        }));
+            item.Selected = true;
+            checkBox.IsChecked = true;
+            return;
+        }
+        item.Selected = checkBox.IsChecked == true;
+        if (!item.Selected)
+        {
+            var relatedRows = (selectionCoordinator?.SessionsForSource(item.Id) ?? [])
+                .Select(id => sessionRowsById.GetValueOrDefault(id))
+                .Where(row => row is { Selected: true })
+                .Cast<SessionGroupRow>()
+                .ToList();
+            SetSessionSelection(relatedRows, false, false);
+        }
+        RefreshSelectionUi();
+    }
+
+    private void CleanupSelection_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is not CheckBox { DataContext: CleanupCandidate candidate } checkBox) return;
+        if (!candidate.SafeToQuarantine)
+        {
+            candidate.Selected = false;
+            checkBox.IsChecked = false;
+            return;
+        }
+        candidate.Selected = checkBox.IsChecked == true;
+        UpdateCleanupSummary();
     }
 
     private void SetSessionSelection(IReadOnlyCollection<SessionGroupRow> rows, bool selected, bool refresh = true)
@@ -251,6 +265,10 @@ public partial class MainWindow : Window
 
     private void RebuildSelectionCoordinator()
     {
+        sourcesById.Clear();
+        foreach (var source in sources) sourcesById[source.Id] = source;
+        sessionRowsById.Clear();
+        foreach (var row in sessionRows) sessionRowsById[row.Id] = row;
         selectionCoordinator = SelectionCoordinator.Build(
             sessionRows.Select(row => new SessionSelectionGroup(row.Id, row.References)),
             sources,
@@ -266,7 +284,7 @@ public partial class MainWindow : Window
             foreach (var row in sessionRows.Where(row => row.Selected).ToList())
             {
                 var missing = selectionCoordinator.SourcesForSession(row.Id)
-                    .Select(id => sources.FirstOrDefault(source => source.Id.Equals(id, StringComparison.OrdinalIgnoreCase)))
+                    .Select(id => sourcesById.GetValueOrDefault(id))
                     .Any(source => source is { Selected: false });
                 if (!missing) continue;
                 row.Selected = false;
@@ -279,24 +297,19 @@ public partial class MainWindow : Window
 
     private void RefreshSelectionUi()
     {
-        sourcesView.Refresh();
-        sessionView.Refresh();
+        if (SourceFilterBox?.SelectedIndex == 2) sourcesView.Refresh();
+        if (SessionFilterBox?.SelectedIndex == 6) sessionView.Refresh();
         UpdateSourceSummary();
         UpdateSessionSummary();
         UpdateTabHeaders();
-        ScheduleCoverageRefresh();
+        MarkCoveragePending();
     }
 
-    private CancellationTokenSource? coverageRefreshCts;
-    private void ScheduleCoverageRefresh()
+    private void MarkCoveragePending()
     {
-        coverageRefreshCts?.Cancel();
-        var cts = coverageRefreshCts = new();
-        Dispatcher.BeginInvoke(DispatcherPriority.ContextIdle, new Action(() =>
-        {
-            if (cts.IsCancellationRequested || cts != coverageRefreshCts) return;
-            RefreshCoverage();
-        }));
+        if (scan is null || CoverageSummaryText is null || PreflightStatusText is null) return;
+        CoverageSummaryText.Text = $"已选择 {sessionRows.Count(row => row.Selected)} / {sessionRows.Count} 个独立会话。选择已记录；这里不会扫描磁盘。点击“重新检查是否齐全”或“开始备份”时再统一核对。";
+        PreflightStatusText.Text = "重装判定：选择已更改，等待重新检查";
     }
 
     private void UpdateSourceSummary()
@@ -452,7 +465,7 @@ public partial class MainWindow : Window
                 : BackupScopePolicy.Explanation(item);
         }
         RebuildSelectionCoordinator();
-        sourcesView.Refresh(); SourcesGrid.Items.Refresh();
+        sourcesView.Refresh();
         UpdateTabHeaders();
     }
     private BackupRequest CurrentBackupRequest(bool includePreflight = true)
@@ -470,6 +483,7 @@ public partial class MainWindow : Window
     }
     private void RefreshCoverage()
     {
+        coverageEvaluationCount++;
         if (scan is null || CoverageSummaryText is null) return;
         var request = CurrentBackupRequest(false);
         var gaps = MigrationCoverage.Evaluate(request);

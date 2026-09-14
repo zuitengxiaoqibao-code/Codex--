@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.ComponentModel;
 using CodexBackup.Core;
 using Xunit;
 
@@ -6,6 +7,24 @@ namespace CodexBackup.Tests;
 
 public class MigrationCoverageTests
 {
+    [Fact]
+    public void SourceSelectionPublishesOnlyBindingNotificationsWithoutACollectionRefresh()
+    {
+        var source = new SourceItem { Exists = true, Selected = true, Required = false };
+        var observable = Assert.IsAssignableFrom<INotifyPropertyChanged>(source);
+        var changed = new List<string>();
+        observable.PropertyChanged += (_, args) => changed.Add(args.PropertyName ?? "");
+
+        source.Selected = false;
+
+        Assert.Contains(nameof(SourceItem.Selected), changed);
+        Assert.Contains(nameof(SourceItem.StatusText), changed);
+        Assert.Contains(nameof(SourceItem.HasProblem), changed);
+        var count = changed.Count;
+        source.Selected = false;
+        Assert.Equal(count, changed.Count);
+    }
+
     [Fact]
     public void SelectionCoordinatorKeepsSharedProjectUntilLastSessionIsCleared()
     {

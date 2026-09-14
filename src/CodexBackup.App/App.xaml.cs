@@ -69,32 +69,53 @@ public partial class App : Application
                 foreach (var row in SessionGroupRow.Create(stressReferences)) sessionItems.Add(row);
                 typeof(MainWindow).GetMethod("RebuildSelectionCoordinator", bindingFlags)!.Invoke(window, null);
                 var setSelection = typeof(MainWindow).GetMethod("SetSessionSelection", bindingFlags)!;
+                var sessionSelectionClick = typeof(MainWindow).GetMethod("SessionSelection_Click", bindingFlags)!;
+                var sourceSelectionClick = typeof(MainWindow).GetMethod("SourceSelection_Click", bindingFlags)!;
+                var coverageCounter = typeof(MainWindow).GetField("coverageEvaluationCount", bindingFlags)!;
                 var allRows = sessionItems.ToList();
+                var coverageBeforeSelection = (int)coverageCounter.GetValue(window)!;
                 var batchTimer = Stopwatch.StartNew();
                 setSelection.Invoke(window, [allRows, false, true]);
                 setSelection.Invoke(window, [allRows, true, true]);
+                await window.Dispatcher.InvokeAsync(() => { }, System.Windows.Threading.DispatcherPriority.ApplicationIdle);
                 batchTimer.Stop();
+                var selectionCheckBox = new CheckBox { DataContext = allRows[0], IsChecked = false };
                 var singleTimer = Stopwatch.StartNew();
-                setSelection.Invoke(window, [new List<SessionGroupRow> { allRows[0] }, false, true]);
-                setSelection.Invoke(window, [new List<SessionGroupRow> { allRows[0] }, true, true]);
+                sessionSelectionClick.Invoke(window, [selectionCheckBox, new RoutedEventArgs()]);
+                selectionCheckBox.IsChecked = true;
+                sessionSelectionClick.Invoke(window, [selectionCheckBox, new RoutedEventArgs()]);
+                await window.Dispatcher.InvokeAsync(() => { }, System.Windows.Threading.DispatcherPriority.ApplicationIdle);
                 singleTimer.Stop();
-                var selectionResponsive = batchTimer.Elapsed < TimeSpan.FromSeconds(2) && singleTimer.Elapsed < TimeSpan.FromMilliseconds(500);
-                sourceItems.Clear(); sessionItems.Clear();
+                var sourceCheckBox = new CheckBox { DataContext = sourceItems[1], IsChecked = false };
+                var sourceTimer = Stopwatch.StartNew();
+                sourceSelectionClick.Invoke(window, [sourceCheckBox, new RoutedEventArgs()]);
+                sourceCheckBox.IsChecked = true;
+                sourceSelectionClick.Invoke(window, [sourceCheckBox, new RoutedEventArgs()]);
+                setSelection.Invoke(window, [allRows, true, true]);
+                await window.Dispatcher.InvokeAsync(() => { }, System.Windows.Threading.DispatcherPriority.ApplicationIdle);
+                sourceTimer.Stop();
+                var selectionResponsive = batchTimer.Elapsed < TimeSpan.FromSeconds(2)
+                    && singleTimer.Elapsed < TimeSpan.FromMilliseconds(500)
+                    && sourceTimer.Elapsed < TimeSpan.FromSeconds(1);
+                var selectionScheduledCoverage = (int)coverageCounter.GetValue(window)! != coverageBeforeSelection;
                 try
                 {
+                    ((FrameworkElement)window.FindName("SessionsGrid")).BringIntoView();
+                    window.UpdateLayout();
                     var bitmap = new RenderTargetBitmap((int)window.ActualWidth, (int)window.ActualHeight, 96, 96, PixelFormats.Pbgra32);
                     bitmap.Render(window); var encoder = new PngBitmapEncoder(); encoder.Frames.Add(BitmapFrame.Create(bitmap));
                     backupScreenshot = Path.Combine(Path.GetDirectoryName(output)!, Path.GetFileNameWithoutExtension(output) + ".backup.png");
                     using var stream = File.Create(backupScreenshot); encoder.Save(stream);
                 }
                 catch { backupScreenshot = null; }
+                sourceItems.Clear(); sessionItems.Clear();
                 Click("BackHome_Click", "HomePage");
                 Click("OpenRestore_Click", "RestorePage");
                 Click("BackHome_Click", "HomePage");
                 Click("OpenCheck_Click", "CheckPage");
-                var report = new { initialized = true, namedControlsValid = missing.Length == 0, missing, screenshot, backupScreenshot, navigation, selectionResponsive, selectionStress = new { sessions = 1000, batchMilliseconds = batchTimer.Elapsed.TotalMilliseconds, singleMilliseconds = singleTimer.Elapsed.TotalMilliseconds }, limitation = "验证窗口、静态渲染、入口导航和千条会话选择响应；不代替文件选择对话框、完整向导及新系统人工验收。" };
+                var report = new { initialized = true, namedControlsValid = missing.Length == 0, missing, screenshot, backupScreenshot, navigation, selectionResponsive, selectionScheduledCoverage, selectionStress = new { sessions = 1000, batchMilliseconds = batchTimer.Elapsed.TotalMilliseconds, singleMilliseconds = singleTimer.Elapsed.TotalMilliseconds, sharedSourceMilliseconds = sourceTimer.Elapsed.TotalMilliseconds }, limitation = "验证窗口、静态渲染、入口导航和千条会话选择响应；不代替文件选择对话框、完整向导及新系统人工验收。" };
                 File.WriteAllText(output, JsonSerializer.Serialize(report, new JsonSerializerOptions { WriteIndented = true }));
-                Shutdown(missing.Length == 0 && selectionResponsive ? 0 : 2);
+                Shutdown(missing.Length == 0 && selectionResponsive && !selectionScheduledCoverage ? 0 : 2);
             }
             catch (Exception ex)
             {
