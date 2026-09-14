@@ -28,7 +28,7 @@ public sealed class SourceItem
     public List<string> DependencyIds { get; set; } = [];
     public string PriorityText => Required ? "必须备份" : Kind is SourceKind.Project or SourceKind.Session or SourceKind.Memory ? "建议备份" : "可选保存";
     public int PriorityRank => Required ? 0 : Kind is SourceKind.Project or SourceKind.Session or SourceKind.Memory ? 1 : 2;
-    public string StatusText => !Exists ? "找不到" : Required ? "必选" : Selected ? "已选择" : "未选择";
+    public string StatusText => !Exists ? "找不到" : Selected ? "已选择" : "未选择";
     public bool HasProblem => !Exists || (Required && !Selected);
 }
 

@@ -886,7 +886,6 @@ public sealed class SourceStatusBrushConverter : IValueConverter
     public object Convert(object value, Type targetType, object parameter, CultureInfo culture) => value switch
     {
         "找不到" => Brushes.Firebrick,
-        "必选" => Brushes.Firebrick,
         "已选择" => Brushes.ForestGreen,
         _ => Brushes.DimGray
     };
