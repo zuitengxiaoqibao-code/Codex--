@@ -450,6 +450,21 @@ public class DiscoveryTests
     }
 
     [Fact]
+    public async Task ProfileConfigIncludesOfficialObsoleteSettingAudit()
+    {
+        using var t = new TestTree();
+        var profile = t.Dir("profile");
+        t.Dir("profile/.codex");
+        var config = t.Write("profile/.codex/config.toml", "approval_policy = 'untrusted'\n[features]\nweb_search = true\n");
+
+        var result = await new DiscoveryService().ScanAsync(profile);
+
+        Assert.Contains(result.Findings, finding => finding.Code == "official-unsupported-config" && finding.Path == Path.GetFullPath(config));
+        Assert.Contains(result.Findings, finding => finding.Code == "official-deprecated-config" && finding.Path == Path.GetFullPath(config));
+        Assert.Contains(result.Items, item => item.Kind == SourceKind.Core && item.Selected && PathSafety.Contains(item.Path, config));
+    }
+
+    [Fact]
     public async Task ConfigPathArraysCanSpanLinesAndRetainEachExternalReference()
     {
         using var t = new TestTree();

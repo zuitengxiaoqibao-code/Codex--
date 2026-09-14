@@ -310,6 +310,7 @@ public partial class MainWindow : Window
         if (scan is null || CoverageSummaryText is null || PreflightStatusText is null) return;
         CoverageSummaryText.Text = $"已选择 {sessionRows.Count(row => row.Selected)} / {sessionRows.Count} 个独立会话。选择已记录；这里不会扫描磁盘。点击“重新检查是否齐全”或“开始备份”时再统一核对。";
         PreflightStatusText.Text = "重装判定：选择已更改，等待重新检查";
+        UpdateSimpleSummaries();
     }
 
     private void UpdateSourceSummary()
@@ -357,6 +358,39 @@ public partial class MainWindow : Window
         ToolsTab.Header = "插件工具 " + Count(sources.Where(item => item.Kind is SourceKind.Plugin or SourceKind.Tool));
         OtherTab.Header = "其他 " + Count(sources.Where(item => item.Kind is SourceKind.Application or SourceKind.Custom));
         CleanupTab.Header = $"清理 {cleanupCandidates.Count(candidate => candidate.Selected)}/{cleanupCandidates.Count}";
+    }
+
+    private void UpdateSimpleSummaries()
+    {
+        if (RecommendedSelectionSummaryText is null || OfficialAuditSummaryText is null) return;
+        if (scan is null)
+        {
+            RecommendedSelectionSummaryText.Text = "扫描后会在这里列出会话、项目、技能、记忆库和个人配置。";
+            OfficialAuditSummaryText.Text = "扫描后会按 OpenAI 官方配置参考检查已不支持、已弃用和已更名的设置。只提示，不删除。";
+            OfficialAuditSummaryText.Foreground = new SolidColorBrush(Color.FromRgb(89, 65, 169));
+            return;
+        }
+
+        int Selected(SourceKind kind) => sources.Count(item => item.Selected && item.Kind == kind);
+        var personalConfig = sources.Count(item => item.Selected && item.Kind is SourceKind.Core or SourceKind.Session or SourceKind.Environment);
+        var extensions = sources.Count(item => item.Selected && item.Kind is SourceKind.Plugin or SourceKind.Tool);
+        RecommendedSelectionSummaryText.Text =
+            $"已选 {sessionRows.Count(row => row.Selected)} / {sessionRows.Count} 个会话、{Selected(SourceKind.Project)} 个项目位置、{Selected(SourceKind.Memory)} 个记忆位置、{Selected(SourceKind.Skill)} 个技能位置、{personalConfig} 个会话数据或个人配置、{extensions} 个插件工具位置。";
+
+        var unsupported = scan.Findings.Count(finding => finding.Code == "official-unsupported-config");
+        var deprecated = scan.Findings.Count(finding => finding.Code == "official-deprecated-config");
+        var legacy = scan.Findings.Count(finding => finding.Code == "official-legacy-config");
+        var unconfirmed = scan.Findings.Count(finding => finding.Code == "official-config-format-unconfirmed");
+        var total = unsupported + deprecated + legacy + unconfirmed;
+        if (total == 0)
+        {
+            OfficialAuditSummaryText.Text = "按当前 OpenAI 官方配置参考，没有发现明确已不支持、已弃用或已更名的设置。配置文件仍会正常备份。";
+            OfficialAuditSummaryText.Foreground = Brushes.SeaGreen;
+            return;
+        }
+
+        OfficialAuditSummaryText.Text = $"发现：已不支持 {unsupported} 项，已弃用 {deprecated} 项，旧名称 {legacy} 项，官方未确认的旧文件名 {unconfirmed} 项。原文件仍会备份，不会自动删除或改写；展开下方明细可查看替代项。";
+        OfficialAuditSummaryText.Foreground = unsupported > 0 ? Brushes.Firebrick : deprecated > 0 ? Brushes.DarkGoldenrod : new SolidColorBrush(Color.FromRgb(89, 65, 169));
     }
 
     private static string? PickFolder(string title, string? initial = null)
@@ -503,7 +537,7 @@ public partial class MainWindow : Window
         foreach (var group in FindingGroup.Create(visibleFindings)) findingGroups.Add(group);
         if (gaps.Count > 300) findingGroups.Add(FindingGroup.ForOverflow(gaps.Count - 300));
         TechnicalDetailsBox.Text = string.Join(Environment.NewLine, scan.Findings.Concat(gaps).Select(f => $"{f.Code}: {f.Message} {f.Path}"));
-        UpdateSourceSummary(); UpdateSessionSummary();
+        UpdateSourceSummary(); UpdateSessionSummary(); UpdateSimpleSummaries();
     }
     private void CheckCoverage_Click(object sender, RoutedEventArgs e)
     {
@@ -949,14 +983,28 @@ public sealed class FindingRow
     public FindingRow(Finding finding)
     {
         Finding = finding;
-        PriorityText = finding.Level switch { FindingLevel.Blocker => "必须先处理", FindingLevel.Warning => "需要核对", _ => "说明" };
+        PriorityText = finding.Code switch
+        {
+            "official-unsupported-config" => "新系统前必须修改",
+            "official-deprecated-config" => "建议迁移",
+            "official-legacy-config" => "旧名称兼容",
+            "official-config-format-unconfirmed" => "人工核对",
+            _ => finding.Level switch { FindingLevel.Blocker => "必须先处理", FindingLevel.Warning => "需要核对", _ => "说明" }
+        };
         Category = CategoryFor(finding.Code);
         Reason = finding.Message;
-        Impact = finding.Level switch
+        Impact = finding.Code switch
         {
-            FindingLevel.Blocker => "会阻止完整迁移，当前结果不能支持重装。",
-            FindingLevel.Warning => "可能漏掉部分内容，需要在来源列表中确认。",
-            _ => "不会阻止备份，但恢复后需要按说明复核。"
+            "official-unsupported-config" => "不会阻止备份；在新系统继续使用原设置可能导致对应功能不可用。",
+            "official-deprecated-config" => "不会阻止备份；以后版本可能移除兼容支持。",
+            "official-legacy-config" => "不会阻止备份；建议按官方新名称迁移。",
+            "official-config-format-unconfirmed" => "官方资料不足，文件继续保留，不能当作垃圾删除。",
+            _ => finding.Level switch
+            {
+                FindingLevel.Blocker => "会阻止完整迁移，当前结果不能支持重装。",
+                FindingLevel.Warning => "可能漏掉部分内容，需要在来源列表中确认。",
+                _ => "不会阻止备份，但恢复后需要按说明复核。"
+            }
         };
         Action = UserGuidance.Explain(finding).Split("\n处理：", StringSplitOptions.None).LastOrDefault() ?? "按位置和说明处理后重新检查。";
     }
@@ -969,10 +1017,21 @@ public sealed class FindingRow
     public string Impact { get; }
     public string Action { get; }
     public string Path => Finding.Path ?? "";
-    public Brush AccentBrush => Level switch { FindingLevel.Blocker => Brushes.Firebrick, FindingLevel.Warning => Brushes.DarkGoldenrod, _ => Brushes.RoyalBlue };
+    public Brush AccentBrush => Finding.Code switch
+    {
+        "official-unsupported-config" => Brushes.Firebrick,
+        "official-deprecated-config" => Brushes.DarkGoldenrod,
+        "official-legacy-config" => Brushes.MediumPurple,
+        "official-config-format-unconfirmed" => Brushes.SlateBlue,
+        _ => Level switch { FindingLevel.Blocker => Brushes.Firebrick, FindingLevel.Warning => Brushes.DarkGoldenrod, _ => Brushes.RoyalBlue }
+    };
 
     private static string CategoryFor(string code) => code switch
     {
+        "official-unsupported-config" => "官方配置：已不支持",
+        "official-deprecated-config" => "官方配置：已弃用",
+        "official-legacy-config" => "官方配置：旧名称",
+        "official-config-format-unconfirmed" => "官方配置：未确认文件名",
         var value when value.Contains("session", StringComparison.OrdinalIgnoreCase) || value.Contains("project", StringComparison.OrdinalIgnoreCase) => "会话与项目关联",
         var value when value.Contains("config", StringComparison.OrdinalIgnoreCase) || value.Contains("path", StringComparison.OrdinalIgnoreCase) || value.Contains("sqlite", StringComparison.OrdinalIgnoreCase) => "配置与路径",
         var value when value.Contains("active") || value.Contains("wal", StringComparison.OrdinalIgnoreCase) || value.Contains("writer", StringComparison.OrdinalIgnoreCase) => "运行状态",
@@ -997,8 +1056,22 @@ public sealed class FindingGroup
     public string Category { get; }
     public IReadOnlyList<FindingRow> Items { get; }
     public string Header { get; }
-    public string LevelText => Level switch { FindingLevel.Blocker => "必须先处理", FindingLevel.Warning => "需要核对", _ => "说明" };
-    public Brush AccentBrush => Level switch { FindingLevel.Blocker => Brushes.Firebrick, FindingLevel.Warning => Brushes.DarkGoldenrod, _ => Brushes.RoyalBlue };
+    public string LevelText => Category switch
+    {
+        "官方配置：已不支持" => "新系统前必须修改",
+        "官方配置：已弃用" => "建议迁移",
+        "官方配置：旧名称" => "兼容提示",
+        "官方配置：未确认文件名" => "保留并核对",
+        _ => Level switch { FindingLevel.Blocker => "必须先处理", FindingLevel.Warning => "需要核对", _ => "说明" }
+    };
+    public Brush AccentBrush => Category switch
+    {
+        "官方配置：已不支持" => Brushes.Firebrick,
+        "官方配置：已弃用" => Brushes.DarkGoldenrod,
+        "官方配置：旧名称" => Brushes.MediumPurple,
+        "官方配置：未确认文件名" => Brushes.SlateBlue,
+        _ => Level switch { FindingLevel.Blocker => Brushes.Firebrick, FindingLevel.Warning => Brushes.DarkGoldenrod, _ => Brushes.RoyalBlue }
+    };
 
     public static IEnumerable<FindingGroup> Create(IEnumerable<Finding> findings) => findings
         .Select(finding => new FindingRow(finding))

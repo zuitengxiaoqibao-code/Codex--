@@ -543,6 +543,7 @@ public sealed class DiscoveryService
                 if (!external.Exists) findings.Add(new(FindingLevel.Warning, "configured-external-path-missing", "Codex 配置引用的外部文件或目录不存在；恢复后需要重新定位。", configured));
             }
             var toml = ReadTomlStatements(full, 100000);
+            findings.AddRange(OfficialConfigAudit.Inspect(toml.Statements, full));
             if (toml.Truncated) findings.Add(new(FindingLevel.Warning, "config-line-limit", "配置文件行数超过十万，后续内容未检测。", full));
             var localMarketplaceSections = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             var prepassSection = "";

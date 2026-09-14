@@ -57,6 +57,7 @@ public static class MigrationCoverage
         }
         foreach (var finding in request.DiscoveryFindings)
         {
+            if (finding.Code.StartsWith("official-", StringComparison.Ordinal)) continue;
             if (finding.Code is "known-location-missing" or "active-writers" or "coverage-boundary" or "codex-version-unknown" || finding.Code.StartsWith("msix-")) continue;
             if (finding.Code is "referenced-project-missing" or "referenced-memory-missing" or "required-codex-root-missing" or "session-file-missing" or "session-transcript-missing" or "configured-session-missing" or "gitdir-missing" or "git-commondir-missing")
             {

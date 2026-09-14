@@ -29,6 +29,12 @@ public static class UserGuidance
         if (code.Contains("missing")) return "找不到原来的文件\n影响：对应项目或会话可能无法恢复，不能把缺失内容算作已备份。\n处理：接上原硬盘，或在来源列表选中该项，点击“定位已搬走的文件”。" + location;
         if (code == "active-writers" || code.Contains("wal")) return "Codex 还在使用数据\n影响：刚产生的会话或项目记录可能尚未保存完整。\n处理：正常退出 Codex、终端任务和桥接工具后，点击“重新扫描”。本工具不会替你强制关闭程序。" + location;
         if (code == "coverage-boundary") return "还有需要单独确认的内容\n网络电脑、云端任务、WSL、Docker 和其他 Windows 用户不属于本机目录扫描。若你使用过它们，请先导出到本地，再添加到备份。";
+        if (code == "official-unsupported-config")
+            return "发现当前 Codex 已不支持的旧设置\n影响：原配置仍会原样备份，但新系统启用前必须按官方建议修改，否则相关功能可能无法使用。\n处理：展开“官方旧配置”查看旧项和替代项；本工具只提示，不会自动改写或删除。" + location;
+        if (code is "official-deprecated-config" or "official-legacy-config")
+            return "发现官方已弃用或已更名的旧设置\n影响：原配置仍会原样备份；以后版本可能不再兼容。\n处理：按提示迁移到官方新名称。本工具不会自动改写，以免改变你的现有行为。" + location;
+        if (code == "official-config-format-unconfirmed")
+            return "发现官方配置参考没有确认的旧文件名\n影响：不能确认当前 Codex 是否仍读取它，也不能据此删除。\n处理：文件仍会保留并备份；恢复后先人工核对，再决定是否继续使用。" + location;
         if (code == "complete-session-selection") return "完整迁移还没有包含全部已发现会话\n影响：如果继续，备份包不能证明会话列表完整。\n处理：在会话列表中选择全部需要保留的活动和归档会话；只想保存其中一部分时，请切换到自选 / 抢救模式。" + location;
         if (code.StartsWith("msix-") || code == "codex-version-unknown") return "部分安装信息暂未确认\n影响：不等于会话丢失，但不能据此确认新旧版本兼容。\n处理：以扫描找到的数据位置为准，恢复前安装 Codex；安装信息可在详细记录中核对。" + location;
         if (code.StartsWith("complete-")) return "完整迁移暂不能继续\n" + finding.Message + location;

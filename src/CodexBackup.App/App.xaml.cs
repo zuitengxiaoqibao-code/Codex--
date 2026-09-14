@@ -28,10 +28,13 @@ public partial class App : Application
             try
             {
                 window.Show(); window.UpdateLayout();
-                var expected = new[] { "WelcomePage", "HomePage", "BackupPage", "RestorePage", "CheckPage", "BusyPanel", "ResultPage", "BackupContentTabs", "SourceSelectionPanel", "SessionSelectionPanel", "CleanupSelectionPanel", "SourcesGrid", "SourceFilterBox", "SourceSearchBox", "SessionsGrid", "SessionFilterBox", "SessionSearchBox", "CleanupGrid", "RunCleanupButton", "BackupFindingsList", "SourceSummaryText", "SessionSummaryText", "CleanupSummaryText" };
+                var expected = new[] { "WelcomePage", "HomePage", "BackupPage", "RestorePage", "CheckPage", "BusyPanel", "ResultPage", "AdvancedScanExpander", "AdvancedBackupExpander", "ManualSelectionExpander", "RecommendedSelectionSummaryText", "OfficialAuditSummaryText", "BackupContentTabs", "SourceSelectionPanel", "SessionSelectionPanel", "CleanupSelectionPanel", "SourcesGrid", "SourceFilterBox", "SourceSearchBox", "SessionsGrid", "SessionFilterBox", "SessionSearchBox", "CleanupGrid", "RunCleanupButton", "BackupFindingsList", "SourceSummaryText", "SessionSummaryText", "CleanupSummaryText" };
                 var missing = expected.Where(name => window.FindName(name) is null).ToArray();
+                var advancedSectionsCollapsed = new[] { "AdvancedScanExpander", "AdvancedBackupExpander", "ManualSelectionExpander" }
+                    .All(name => window.FindName(name) is Expander { IsExpanded: false });
                 string? screenshot = null;
                 string? backupScreenshot = null;
+                string? manualScreenshot = null;
                 try
                 {
                     var bitmap = new RenderTargetBitmap((int)window.ActualWidth, (int)window.ActualHeight, 96, 96, PixelFormats.Pbgra32);
@@ -52,6 +55,16 @@ public partial class App : Application
                 Click("WelcomeContinue_Click", "HomePage");
                 Click("OpenBackup_Click", "BackupPage");
                 window.UpdateLayout();
+                try
+                {
+                    var bitmap = new RenderTargetBitmap((int)window.ActualWidth, (int)window.ActualHeight, 96, 96, PixelFormats.Pbgra32);
+                    bitmap.Render(window); var encoder = new PngBitmapEncoder(); encoder.Frames.Add(BitmapFrame.Create(bitmap));
+                    backupScreenshot = Path.Combine(Path.GetDirectoryName(output)!, Path.GetFileNameWithoutExtension(output) + ".backup.png");
+                    using var stream = File.Create(backupScreenshot); encoder.Save(stream);
+                }
+                catch { backupScreenshot = null; }
+                ((Expander)window.FindName("ManualSelectionExpander")).IsExpanded = true;
+                window.UpdateLayout();
                 var tabs = (TabControl)window.FindName("BackupContentTabs");
                 tabs.SelectedIndex = 1; window.UpdateLayout();
                 if (((FrameworkElement)window.FindName("SourceSelectionPanel")).Visibility != Visibility.Visible) throw new InvalidOperationException("Source type tab failed");
@@ -67,7 +80,21 @@ public partial class App : Application
                 sourceItems.Add(new Core.SourceItem { Id = "project", Kind = Core.SourceKind.Project, Path = @"C:\synthetic\project", Selected = true, IsDirectory = true });
                 var stressReferences = Enumerable.Range(0, 1000).Select(i => new Core.SessionReference { Id = "stress-" + i, CorePath = @"C:\synthetic\core", ProjectPath = @"C:\synthetic\project", TranscriptPath = @"C:\synthetic\core\sessions\" + i + ".jsonl", Selected = true }).ToList();
                 foreach (var row in SessionGroupRow.Create(stressReferences)) sessionItems.Add(row);
+                typeof(MainWindow).GetField("scan", bindingFlags)!.SetValue(window, new Core.ScanResult
+                {
+                    Items = sourceItems.ToList(),
+                    Sessions = stressReferences,
+                    Findings =
+                    [
+                        new(Core.FindingLevel.Warning, "official-unsupported-config", "synthetic unsupported"),
+                        new(Core.FindingLevel.Warning, "official-deprecated-config", "synthetic deprecated")
+                    ]
+                });
                 typeof(MainWindow).GetMethod("RebuildSelectionCoordinator", bindingFlags)!.Invoke(window, null);
+                typeof(MainWindow).GetMethod("UpdateSimpleSummaries", bindingFlags)!.Invoke(window, null);
+                var simpleSummaryValid = ((TextBlock)window.FindName("RecommendedSelectionSummaryText")).Text.Contains("1000 / 1000", StringComparison.Ordinal)
+                    && ((TextBlock)window.FindName("OfficialAuditSummaryText")).Text.Contains("已不支持 1 项", StringComparison.Ordinal)
+                    && ((TextBlock)window.FindName("OfficialAuditSummaryText")).Text.Contains("不会自动删除或改写", StringComparison.Ordinal);
                 var setSelection = typeof(MainWindow).GetMethod("SetSessionSelection", bindingFlags)!;
                 var sessionSelectionClick = typeof(MainWindow).GetMethod("SessionSelection_Click", bindingFlags)!;
                 var sourceSelectionClick = typeof(MainWindow).GetMethod("SourceSelection_Click", bindingFlags)!;
@@ -104,18 +131,18 @@ public partial class App : Application
                     window.UpdateLayout();
                     var bitmap = new RenderTargetBitmap((int)window.ActualWidth, (int)window.ActualHeight, 96, 96, PixelFormats.Pbgra32);
                     bitmap.Render(window); var encoder = new PngBitmapEncoder(); encoder.Frames.Add(BitmapFrame.Create(bitmap));
-                    backupScreenshot = Path.Combine(Path.GetDirectoryName(output)!, Path.GetFileNameWithoutExtension(output) + ".backup.png");
-                    using var stream = File.Create(backupScreenshot); encoder.Save(stream);
+                    manualScreenshot = Path.Combine(Path.GetDirectoryName(output)!, Path.GetFileNameWithoutExtension(output) + ".manual.png");
+                    using var stream = File.Create(manualScreenshot); encoder.Save(stream);
                 }
-                catch { backupScreenshot = null; }
+                catch { manualScreenshot = null; }
                 sourceItems.Clear(); sessionItems.Clear();
                 Click("BackHome_Click", "HomePage");
                 Click("OpenRestore_Click", "RestorePage");
                 Click("BackHome_Click", "HomePage");
                 Click("OpenCheck_Click", "CheckPage");
-                var report = new { initialized = true, namedControlsValid = missing.Length == 0, missing, screenshot, backupScreenshot, navigation, selectionResponsive, selectionScheduledCoverage, selectionStress = new { sessions = 1000, batchMilliseconds = batchTimer.Elapsed.TotalMilliseconds, singleMilliseconds = singleTimer.Elapsed.TotalMilliseconds, sharedSourceMilliseconds = sourceTimer.Elapsed.TotalMilliseconds }, limitation = "验证窗口、静态渲染、入口导航和千条会话选择响应；不代替文件选择对话框、完整向导及新系统人工验收。" };
+                var report = new { initialized = true, namedControlsValid = missing.Length == 0, advancedSectionsCollapsed, simpleSummaryValid, missing, screenshot, backupScreenshot, manualScreenshot, navigation, selectionResponsive, selectionScheduledCoverage, selectionStress = new { sessions = 1000, batchMilliseconds = batchTimer.Elapsed.TotalMilliseconds, singleMilliseconds = singleTimer.Elapsed.TotalMilliseconds, sharedSourceMilliseconds = sourceTimer.Elapsed.TotalMilliseconds }, limitation = "验证窗口、静态渲染、入口导航和千条会话选择响应；不代替文件选择对话框、完整向导及新系统人工验收。" };
                 File.WriteAllText(output, JsonSerializer.Serialize(report, new JsonSerializerOptions { WriteIndented = true }));
-                Shutdown(missing.Length == 0 && selectionResponsive && !selectionScheduledCoverage ? 0 : 2);
+                Shutdown(missing.Length == 0 && advancedSectionsCollapsed && simpleSummaryValid && selectionResponsive && !selectionScheduledCoverage ? 0 : 2);
             }
             catch (Exception ex)
             {

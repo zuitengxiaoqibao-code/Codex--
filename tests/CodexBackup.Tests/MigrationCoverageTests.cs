@@ -161,6 +161,20 @@ public class MigrationCoverageTests
         var request = new BackupRequest { CompleteMigration = true, Sources = [core], DiscoveryFindings = [new(FindingLevel.Warning, code, "metadata unavailable")] };
         Assert.Contains(MigrationCoverage.Evaluate(request), f => f.Code == "complete-discovery-incomplete");
     }
+    [Theory]
+    [InlineData("official-unsupported-config", FindingLevel.Warning)]
+    [InlineData("official-deprecated-config", FindingLevel.Warning)]
+    [InlineData("official-legacy-config", FindingLevel.Info)]
+    [InlineData("official-config-format-unconfirmed", FindingLevel.Info)]
+    public void OfficialConfigAuditNeverBlocksCreatingTheBackup(string code, FindingLevel level)
+    {
+        using var t = new TestTree();
+        t.Write("home/config.toml", "old-setting = true");
+        var core = t.Source("home"); core.Kind = SourceKind.Core;
+        var request = new BackupRequest { CompleteMigration = true, Sources = [core], DiscoveryFindings = [new(level, code, "official audit")] };
+
+        Assert.Empty(MigrationCoverage.Evaluate(request));
+    }
     [Fact] public void CompleteModeRejectsUnselectedSourceEvenWhenSessionWasSelected()
     {
         using var t = new TestTree(); t.Write("home/sessions/a.jsonl", "{}"); t.Write("project/app.cs", "source");
