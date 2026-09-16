@@ -11,13 +11,13 @@ public class DiscoveryTests
     public void EnvironmentInventoryRedactsSecretValuesButKeepsNames()
     {
         var manifest = EnvironmentInventory.CollectFromVariables([
-            new KeyValuePair<string, string?>("OPENAI_API_KEY", "sk-live-secret"),
+            new KeyValuePair<string, string?>("OPENAI_API_KEY", "fixture-secret-value"),
             new KeyValuePair<string, string?>("CODEX_HOME", "D:\\codex")
         ]);
 
         var serialized = System.Text.Json.JsonSerializer.Serialize(manifest);
         Assert.Contains("OPENAI_API_KEY", serialized);
-        Assert.DoesNotContain("sk-live-secret", serialized);
+        Assert.DoesNotContain("fixture-secret-value", serialized);
         Assert.DoesNotContain("D:\\codex", serialized);
         Assert.Contains(manifest.Entries, x => x.DisplayName == "OPENAI_API_KEY" && x.Risk == "敏感" && x.Coverage == "仅保存名称");
     }
