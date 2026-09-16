@@ -12,7 +12,7 @@ Unknown top-level resources, config, auth, skills, plugins, automations, nested 
 
 Validation: tests were written before implementation and initially failed because the adapter did not exist. Five fixture tests now pass: known SQLite remapping and integration suppression, unknown table rejection, trigger rejection, longest-prefix / boundary mapping with global-state sanitization, and reserved quarantine collision. The main fixture also proves original DB bytes remain unchanged and JSONL is untouched. Tests use synthetic fixtures only; no real user content was inspected.
 
-Command: `C:\Users\90090\.dotnet\dotnet.exe test tests/CodexBackup.Tests --no-restore --filter FullyQualifiedName~CoreAdapterTests`.
+Command: `%USERPROFILE%\.dotnet\dotnet.exe test tests/CodexBackup.Tests --no-restore --filter FullyQualifiedName~CoreAdapterTests`.
 
 Final amendments: custom CODEX_HOME directories are recognized by Core kind and top-level state/session shape. Mapping inputs must normalize to fully qualified local paths; duplicate normalized sources or targets fail. Path notes are limited to 500 plus a truncation notice. Databases larger than 2 GiB, more than 100,000 rows per path column, or path values above 32,768 characters fail. Known passive global project associations retain only typed local-projects id/name/rootPaths, string-array project-order, and string-valued thread-workspace-root maps; malformed forms reject instead of silently losing associations. Root paths remap; embedded unknown project settings do not activate. Eight adapter fixture tests pass after amendments.
 

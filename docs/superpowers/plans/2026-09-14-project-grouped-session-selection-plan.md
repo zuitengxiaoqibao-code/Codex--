@@ -29,7 +29,7 @@
 - Produces: `SessionProjectGroup` with `Key`, `Name`, `ProjectPath`, `SessionIds`, `LastActivityUtc`, lifecycle counts and problem counts.
 
 - [ ] Write failing tests proving equal paths merge, path casing is ignored, missing paths form one final group, multi-project sessions appear in each related group, and groups sort by recent activity.
-- [ ] Run `C:\Users\90090\.dotnet\dotnet.exe test tests\CodexBackup.Tests -c Release --filter FullyQualifiedName~SessionProjectGroupingTests --no-restore` and confirm the missing component causes failure.
+- [ ] Run `%USERPROFILE%\.dotnet\dotnet.exe test tests\CodexBackup.Tests -c Release --filter FullyQualifiedName~SessionProjectGroupingTests --no-restore` and confirm the missing component causes failure.
 - [ ] Implement grouping from `SessionReference` data only. Normalize local paths with `Path.GetFullPath`; use a stable raw fallback if normalization fails; use `未识别项目` for empty paths.
 - [ ] Run the focused tests and confirm all pass.
 - [ ] Commit Core grouping and tests.

@@ -18,7 +18,7 @@ Date: 2026-09-11
 
 ## Verification evidence
 
-- Release build command: `C:\Users\90090\.dotnet\dotnet.exe build src\CodexBackup.App\CodexBackup.App.csproj -c Release`
+- Release build command: `%USERPROFILE%\.dotnet\dotnet.exe build src\CodexBackup.App\CodexBackup.App.csproj -c Release`
 - Result after the final code build before this report: succeeded with 0 warnings and 0 errors.
 - Current release target: `0.3.5-preview`; core regression suite: 143 passing tests. The backup view now uses type tabs and includes a verified-backup-gated quarantine cleanup workflow.
 - Smoke command: `src\CodexBackup.App\bin\Release\net10.0-windows\CodexBackup.exe --smoke-test docs\ui-smoke.json`

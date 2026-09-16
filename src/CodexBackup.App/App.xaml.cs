@@ -28,10 +28,18 @@ public partial class App : Application
             try
             {
                 window.Show(); window.UpdateLayout();
-                var expected = new[] { "WelcomePage", "HomePage", "BackupPage", "RestorePage", "CheckPage", "BusyPanel", "ResultPage", "AdvancedScanExpander", "AdvancedBackupExpander", "ManualSelectionExpander", "RecommendedSelectionSummaryText", "OfficialAuditSummaryText", "BackupContentTabs", "SourceSelectionPanel", "SessionSelectionPanel", "ProjectSessionSelectionPanel", "ProjectSessionGroupsList", "ProjectSessionFilterBox", "ProjectSessionSearchBox", "IndividualSessionSelectionPanel", "CleanupSelectionPanel", "SourcesGrid", "SourceFilterBox", "SourceSearchBox", "SessionsGrid", "SessionFilterBox", "SessionSearchBox", "CleanupGrid", "RunCleanupButton", "BackupFindingsList", "SourceSummaryText", "SessionSummaryText", "CleanupSummaryText" };
+                var expected = new[] { "WelcomePage", "HomePage", "BackupPage", "RestorePage", "CheckPage", "BusyPanel", "ResultPage", "NavigationPanel", "NavigationButtonsPanel", "NavHomeButton", "NavBackupButton", "NavRestoreButton", "NavCheckButton", "BottomHomeButton", "BottomNextButton", "BottomStepText", "AdvancedScanExpander", "AdvancedBackupExpander", "ManualSelectionExpander", "RecommendedSelectionSummaryText", "OfficialAuditSummaryText", "BackupContentTabs", "SourceSelectionPanel", "SessionSelectionPanel", "ProjectSessionSelectionPanel", "ProjectSessionGroupsList", "ProjectSessionFilterBox", "ProjectSessionSearchBox", "IndividualSessionSelectionPanel", "CleanupSelectionPanel", "SourcesGrid", "SourceFilterBox", "SourceSearchBox", "SessionsGrid", "SessionFilterBox", "SessionSearchBox", "CleanupGrid", "RunCleanupButton", "BackupFindingsList", "SourceSummaryText", "SessionSummaryText", "CleanupSummaryText" };
                 var missing = expected.Where(name => window.FindName(name) is null).ToArray();
                 var advancedSectionsCollapsed = new[] { "AdvancedScanExpander", "AdvancedBackupExpander", "ManualSelectionExpander" }
                     .All(name => window.FindName(name) is Expander { IsExpanded: false });
+                var navigationButtons = new[] { "NavHomeButton", "NavBackupButton", "NavRestoreButton", "NavCheckButton" }
+                    .Select(name => (Button)window.FindName(name)).ToArray();
+                var navigationShellValid = window.FindName("NavigationButtonsPanel") is Panel { IsEnabled: false }
+                    && navigationButtons.All(button => button.Tag is null)
+                    && window.FindName("BottomHomeButton") is Button { Visibility: Visibility.Collapsed }
+                    && window.FindName("BottomNextButton") is Button { Visibility: Visibility.Collapsed }
+                    && window.FindName("BottomStepText") is TextBlock initialStep
+                    && initialStep.Text.Contains("风险", StringComparison.Ordinal);
                 string? screenshot = null;
                 string? backupScreenshot = null;
                 string? manualScreenshot = null;
@@ -45,15 +53,25 @@ public partial class App : Application
                 catch { screenshot = null; }
                 var navigation = new List<string>();
                 ((CheckBox)window.FindName("RiskAcknowledgement")).IsChecked = true;
-                void Click(string handler, string page)
+                void Click(string handler, string page, string activeNavigation, string nextText, bool showHomeButton)
                 {
                     typeof(MainWindow).GetMethod(handler, System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!.Invoke(window, new object[] { window, new RoutedEventArgs() });
                     window.UpdateLayout();
                     if (((FrameworkElement)window.FindName(page)).Visibility != Visibility.Visible) throw new InvalidOperationException("Navigation failed: " + page);
+                    var activeButton = (Button)window.FindName(activeNavigation);
+                    var nextButton = (Button)window.FindName("BottomNextButton");
+                    var homeButton = (Button)window.FindName("BottomHomeButton");
+                    navigationShellValid = navigationShellValid
+                        && ((Panel)window.FindName("NavigationButtonsPanel")).IsEnabled
+                        && activeButton.Tag as string == "Active"
+                        && navigationButtons.Count(button => button.Tag as string == "Active") == 1
+                        && nextButton.Visibility == Visibility.Visible
+                        && nextButton.Content as string == nextText
+                        && homeButton.Visibility == (showHomeButton ? Visibility.Visible : Visibility.Collapsed);
                     navigation.Add(page);
                 }
-                Click("WelcomeContinue_Click", "HomePage");
-                Click("OpenBackup_Click", "BackupPage");
+                Click("WelcomeContinue_Click", "HomePage", "NavHomeButton", "开始备份", false);
+                Click("BottomNext_Click", "BackupPage", "NavBackupButton", "开始备份", true);
                 window.UpdateLayout();
                 var projectSessionViewDefault = window.FindName("ProjectSessionSelectionPanel") is FrameworkElement { Visibility: Visibility.Visible }
                     && window.FindName("IndividualSessionSelectionPanel") is FrameworkElement { Visibility: Visibility.Collapsed };
@@ -149,13 +167,13 @@ public partial class App : Application
                 }
                 catch { manualScreenshot = null; }
                 sourceItems.Clear(); sessionItems.Clear();
-                Click("BackHome_Click", "HomePage");
-                Click("OpenRestore_Click", "RestorePage");
-                Click("BackHome_Click", "HomePage");
-                Click("OpenCheck_Click", "CheckPage");
-                var report = new { initialized = true, namedControlsValid = missing.Length == 0, advancedSectionsCollapsed, projectSessionViewDefault, projectGroupingValid, simpleSummaryValid, missing, screenshot, backupScreenshot, manualScreenshot, navigation, selectionResponsive, selectionScheduledCoverage, selectionStress = new { sessions = 1000, projectGroupMilliseconds = projectTimer.Elapsed.TotalMilliseconds, batchMilliseconds = batchTimer.Elapsed.TotalMilliseconds, singleMilliseconds = singleTimer.Elapsed.TotalMilliseconds, sharedSourceMilliseconds = sourceTimer.Elapsed.TotalMilliseconds }, limitation = "验证窗口、静态渲染、入口导航、项目目录分组和千条会话选择响应；不代替文件选择对话框、完整向导及新系统人工验收。" };
+                Click("BackHome_Click", "HomePage", "NavHomeButton", "开始备份", false);
+                Click("OpenRestore_Click", "RestorePage", "NavRestoreButton", "执行恢复", true);
+                Click("BackHome_Click", "HomePage", "NavHomeButton", "开始备份", false);
+                Click("OpenCheck_Click", "CheckPage", "NavCheckButton", "扫描当前环境", true);
+                var report = new { initialized = true, namedControlsValid = missing.Length == 0, navigationShellValid, advancedSectionsCollapsed, projectSessionViewDefault, projectGroupingValid, simpleSummaryValid, missing, screenshot, backupScreenshot, manualScreenshot, navigation, selectionResponsive, selectionScheduledCoverage, selectionStress = new { sessions = 1000, projectGroupMilliseconds = projectTimer.Elapsed.TotalMilliseconds, batchMilliseconds = batchTimer.Elapsed.TotalMilliseconds, singleMilliseconds = singleTimer.Elapsed.TotalMilliseconds, sharedSourceMilliseconds = sourceTimer.Elapsed.TotalMilliseconds }, limitation = "验证窗口、静态渲染、入口导航、项目目录分组和千条会话选择响应；不代替文件选择对话框、完整向导及新系统人工验收。" };
                 File.WriteAllText(output, JsonSerializer.Serialize(report, new JsonSerializerOptions { WriteIndented = true }));
-                Shutdown(missing.Length == 0 && advancedSectionsCollapsed && projectSessionViewDefault && projectGroupingValid && simpleSummaryValid && selectionResponsive && !selectionScheduledCoverage ? 0 : 2);
+                Shutdown(missing.Length == 0 && navigationShellValid && advancedSectionsCollapsed && projectSessionViewDefault && projectGroupingValid && simpleSummaryValid && selectionResponsive && !selectionScheduledCoverage ? 0 : 2);
             }
             catch (Exception ex)
             {

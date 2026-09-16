@@ -8,7 +8,7 @@ public enum SessionLifecycle { Active, Archived, Unknown }
 public sealed record Finding(FindingLevel Level, string Code, string Message, string? Path = null);
 public static class ProductInfo
 {
-    public const string Version = "0.3.5-preview";
+    public const string Version = "0.3.6-preview";
 }
 
 public sealed class SourceItem : INotifyPropertyChanged

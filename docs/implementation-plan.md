@@ -15,7 +15,7 @@ Global constraints: UTF-8 edits via apply_patch; do not modify real Codex or pro
 - [x] E. Independent review and regression: bounded review of Core and discovery; fix important findings, add regression tests. Verify source trees are unmodified by backup/check; all test mutations under generated fixtures.
 - [x] F. Release: self-contained win-x64 publish, actual EXE smoke and UI automation, Unicode scan, full tests and source snapshot; report actual limits without claiming unperformed clean OS / real Codex restore validation.
 
-Build tools: SDK found at `C:\Users\90090\.dotnet\dotnet.exe` (10.0.302), not system PATH dotnet. Runtime 10.0.10. Pin SDK; use cached NuGet packages where possible. `dotnet test tests/CodexBackup.Tests -c Release` is the regression gate. Publish command will use `-r win-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true`.
+Build tools: SDK found at `%USERPROFILE%\.dotnet\dotnet.exe` (10.0.302), not system PATH dotnet. Runtime 10.0.10. Pin SDK; use cached NuGet packages where possible. `dotnet test tests/CodexBackup.Tests -c Release` is the regression gate. Publish command will use `-r win-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true`.
 
 ## Progress
 

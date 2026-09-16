@@ -37,7 +37,7 @@
 - Define one public `ProductInfo.Version = "0.3.0-preview"` constant and use it for manifest/tool diagnostics.
 
 - [ ] **Step 1: Write failing tests** for unique session counting, association counting, project location counting, blocked preflight when a transcript is missing, and manifest source-version persistence.
-- [ ] **Step 2: Run the focused tests** with `C:\Users\90090\.dotnet\dotnet.exe test tests/CodexBackup.Tests -c Release --filter FullyQualifiedName~MigrationCoverageTests` and confirm the new tests fail for the missing members/behavior.
+- [ ] **Step 2: Run the focused tests** with `%USERPROFILE%\.dotnet\dotnet.exe test tests/CodexBackup.Tests -c Release --filter FullyQualifiedName~MigrationCoverageTests` and confirm the new tests fail for the missing members/behavior.
 - [ ] **Step 3: Implement the model and report types** without changing existing complete-mode semantics. Count unique IDs separately from association rows; preserve all findings and cap only UI rendering, never the report data.
 - [ ] **Step 4: Pass `ScanResult.CodexVersion` into `BackupRequest` and `BackupManifest`**, remove the stale `0.1.0-preview` default, and update UI/result code to use `ProductInfo.Version`.
 - [ ] **Step 5: Run focused tests and then the full suite**; expected result is all tests passing and no change to fail-closed coverage behavior.
@@ -166,7 +166,7 @@
 - Create: `outputs/v0.3/RELEASE.json`
 - Create: `outputs/v0.3/验证说明.md`
 
-- [ ] **Step 1: Run the complete source regression** with `C:\Users\90090\.dotnet\dotnet.exe test tests/CodexBackup.Tests -c Release`; expected result is zero failures.
+- [ ] **Step 1: Run the complete source regression** with `%USERPROFILE%\.dotnet\dotnet.exe test tests/CodexBackup.Tests -c Release`; expected result is zero failures.
 - [ ] **Step 2: Build and publish self-contained win-x64** using the pinned .NET SDK and run `--self-test`, `--smoke-test`, and read-only scan diagnostics.
 - [ ] **Step 3: Run `scripts/verify-release.ps1`** to check hashes, manifest version, package verifier, UTF-8 text and absence of private user paths.
 - [ ] **Step 4: Run an isolated restore rehearsal** from a synthetic package and, when a clean Windows/Sandbox is available, record real Codex application acceptance separately. Do not mutate live user data.

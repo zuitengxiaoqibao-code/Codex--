@@ -68,12 +68,75 @@ public partial class MainWindow : Window
         BackupDestinationBox.Text = "";
         MappingsGrid.CellEditEnding += (_, _) => { restorePreview = null; previewFingerprint = null; };
         Closing += Window_Closing;
+        UpdateNavigation(WelcomePage);
     }
 
     private void ShowPage(FrameworkElement page)
     {
         foreach (var candidate in new[] { WelcomePage, HomePage, BackupPage, RestorePage, CheckPage, ResultPage }) candidate.Visibility = Visibility.Collapsed;
         page.Visibility = Visibility.Visible;
+        UpdateNavigation(page);
+    }
+
+    private void UpdateNavigation(FrameworkElement page)
+    {
+        if (NavigationButtonsPanel is null) return;
+        var acknowledged = RiskAcknowledgement?.IsChecked == true;
+        NavigationButtonsPanel.IsEnabled = acknowledged;
+        foreach (var button in new[] { NavHomeButton, NavBackupButton, NavRestoreButton, NavCheckButton })
+            button.Tag = null;
+        if (ReferenceEquals(page, HomePage))
+        {
+            NavHomeButton.Tag = "Active";
+            BottomHomeButton.Visibility = Visibility.Collapsed;
+            BottomNextButton.Visibility = Visibility.Visible;
+            BottomNextButton.Content = "开始备份";
+            BottomStepText.Text = "准备开始 · 选择备份、恢复或检查";
+        }
+        else if (ReferenceEquals(page, BackupPage))
+        {
+            NavBackupButton.Tag = "Active";
+            BottomHomeButton.Visibility = Visibility.Visible;
+            BottomNextButton.Visibility = Visibility.Visible;
+            BottomNextButton.Content = "开始备份";
+            BottomStepText.Text = "备份 · 扫描、选择并保存个人数据";
+        }
+        else if (ReferenceEquals(page, RestorePage))
+        {
+            NavRestoreButton.Tag = "Active";
+            BottomHomeButton.Visibility = Visibility.Visible;
+            BottomNextButton.Visibility = Visibility.Visible;
+            BottomNextButton.Content = "执行恢复";
+            BottomStepText.Text = "恢复 · 验证备份包并检查目标路径";
+        }
+        else if (ReferenceEquals(page, CheckPage))
+        {
+            NavCheckButton.Tag = "Active";
+            BottomHomeButton.Visibility = Visibility.Visible;
+            BottomNextButton.Visibility = Visibility.Visible;
+            BottomNextButton.Content = "扫描当前环境";
+            BottomStepText.Text = "检查 · 验证备份并完成验收";
+        }
+        else if (ReferenceEquals(page, ResultPage))
+        {
+            BottomHomeButton.Visibility = Visibility.Visible;
+            BottomNextButton.Visibility = Visibility.Collapsed;
+            BottomStepText.Text = "结果 · 请保存报告并完成后续验收";
+        }
+        else
+        {
+            BottomHomeButton.Visibility = Visibility.Collapsed;
+            BottomNextButton.Visibility = Visibility.Collapsed;
+            BottomStepText.Text = "开始前请阅读风险提示";
+        }
+    }
+
+    private void BottomNext_Click(object sender, RoutedEventArgs e)
+    {
+        if (BackupPage.Visibility == Visibility.Visible) StartBackup_Click(sender, e);
+        else if (RestorePage.Visibility == Visibility.Visible) ExecuteRestore_Click(sender, e);
+        else if (CheckPage.Visibility == Visibility.Visible) CheckEnvironment_Click(sender, e);
+        else if (HomePage.Visibility == Visibility.Visible) OpenBackup_Click(sender, e);
     }
 
     private void WelcomeContinue_Click(object sender, RoutedEventArgs e)
@@ -954,12 +1017,22 @@ public partial class MainWindow : Window
     {
         if (operationCts is not null) return;
         operationCts = new CancellationTokenSource(); BusyText.Text = message; BusyStats.Text = ""; BusyPanel.Visibility = Visibility.Visible;
+        NavigationButtonsPanel.IsEnabled = false;
+        BottomHomeButton.IsEnabled = false;
+        BottomNextButton.IsEnabled = false;
         foreach (var page in new[] { WelcomePage, HomePage, BackupPage, RestorePage, CheckPage, ResultPage }) page.IsEnabled = false;
         var progress = new Progress<OperationProgress>(p => { BusyText.Text = p.Message; BusyStats.Text = p.TotalBytes is > 0 ? $"{p.Files:N0} 个文件 · {FormatBytes(p.Bytes)} / {FormatBytes(p.TotalBytes.Value)}" : $"{p.Phase} · {p.Files:N0} 个文件"; });
         try { await action(progress, operationCts.Token); StatusText.Text = "操作结束"; }
         catch (OperationCanceledException) { StatusText.Text = "操作已取消；未完成结果不会被视为成功"; MessageBox.Show(this, "操作已取消。备份中的未完成目录不能用于正式恢复；恢复过程中已完成的步骤请通过日志检查或回滚。", "已取消", MessageBoxButton.OK, MessageBoxImage.Information); }
         catch (Exception ex) { StatusText.Text = "操作失败"; MessageBox.Show(this, UserMessage(ex), "操作未完成", MessageBoxButton.OK, MessageBoxImage.Error); }
-        finally { operationCts.Dispose(); operationCts = null; BusyPanel.Visibility = Visibility.Collapsed; foreach (var page in new[] { WelcomePage, HomePage, BackupPage, RestorePage, CheckPage, ResultPage }) page.IsEnabled = true; }
+        finally
+        {
+            operationCts.Dispose(); operationCts = null; BusyPanel.Visibility = Visibility.Collapsed;
+            foreach (var page in new[] { WelcomePage, HomePage, BackupPage, RestorePage, CheckPage, ResultPage }) page.IsEnabled = true;
+            var activePage = new[] { WelcomePage, HomePage, BackupPage, RestorePage, CheckPage, ResultPage }
+                .FirstOrDefault(page => page.Visibility == Visibility.Visible);
+            if (activePage is not null) UpdateNavigation(activePage);
+        }
     }
 
     private void Cancel_Click(object sender, RoutedEventArgs e) { BusyText.Text = "正在请求安全取消…"; operationCts?.Cancel(); }
